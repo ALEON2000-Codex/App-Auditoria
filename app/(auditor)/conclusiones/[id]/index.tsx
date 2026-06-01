@@ -112,6 +112,9 @@ export default function FinalizarReportePage() {
         .eq('id', reportId);
 
       if (errFinalizeReport) throw errFinalizeReport;
+await supabase.functions.invoke('finalize-report', {
+  body: { reportId: reportId, region: region }
+});
 
       // G. Limpieza de tabla borrador intermedia
       await supabase.from('audit_answers_draft').delete().eq('report_id', reportId);
