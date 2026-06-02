@@ -1,9 +1,9 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'expo-router';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput } from 'react-native';
-import { Picker } from '@react-native-picker/picker'; // Componente nativo para desplegables
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, ActivityIndicator } from 'react-native';
+import { Picker } from '@react-native-picker/picker';
+import { supabase } from '../../../src/supabaseClient';
 
-// Interfaces estrictas para TypeScript
 interface Region {
   id: string;
   nombre: string;
@@ -12,90 +12,88 @@ interface Region {
 interface LocalComercial {
   id: string;
   nombre: string;
-  region_id: string;
-}
-
-interface Responsable {
-  id: string;
-  nombre: string;
-  region_id: string;
+  region: string;
 }
 
 export default function NuevaAuditoriaPage() {
   const router = useRouter();
 
-  // Estados para los datos maestros (simulados por ahora)
+  // Estados de control
+  const [loading, setLoading] = useState(true);
   const [regiones, setRegiones] = useState<Region[]>([]);
-  const [localesTodos, setLocalesTodos] = useState<LocalComercial[]>([]);
-  const [responsablesTodos, setResponsablesTodos] = useState<Responsable[]>([]);
+  const [localesFiltrados, setLocalesFiltrados] = useState<LocalComercial[]>([]);
 
   // Estados del Formulario
   const [regionSeleccionada, setRegionSeleccionada] = useState('');
   const [localSeleccionado, setLocalSeleccionado] = useState('');
-  const [responsableSeleccionado, setResponsableSeleccionado] = useState('');
+  const [responsableTexto, setResponsableTexto] = useState('');
   const [auditorEquipo, setAuditorEquipo] = useState('');
   const [tipoVisita, setTipoVisita] = useState('');
 
-  // Estados filtrados reactivos
-  const [localesFiltrados, setLocalesFiltrados] = useState<LocalComercial[]>([]);
-  const [responsablesFiltrados, setResponsablesFiltrados] = useState<Responsable[]>([]);
-
-  // Carga de datos de simulación inicial
+  // 1. CARGA INICIAL: Regiones corporativas
   useEffect(() => {
     setRegiones([
-      { id: 'reg-1', nombre: 'Región Norte' },
-      { id: 'reg-2', nombre: 'Región Sur' },
+      { id: 'Costa', nombre: 'Región Costa' },
+      { id: 'Sierra', nombre: 'Región Sierra' },
+      { id: 'Oriente', nombre: 'Región Oriente' },
     ]);
-
-    setLocalesTodos([
-      { id: 'loc-1', nombre: 'Sucursal Norte Alta', region_id: 'reg-1' },
-      { id: 'loc-2', nombre: 'Sucursal Norte Centro', region_id: 'reg-1' },
-      { id: 'loc-3', nombre: 'Sucursal Sur Principal', region_id: 'reg-2' },
-    ]);
-
-    setResponsablesTodos([
-      { id: 'resp-1', nombre: 'Carlos Mendoza (Gerente Norte)', region_id: 'reg-1' },
-      { id: 'resp-2', nombre: 'Ana López (Supervisor Norte)', region_id: 'reg-1' },
-      { id: 'resp-3', nombre: 'María Rodríguez (Gerente Sur)', region_id: 'reg-2' },
-    ]);
+    setLoading(false);
   }, []);
 
-  // Filtro reactivo por región geográfica
+  // 2. CONSULTA DIRECTA A SUPABASE: Filtra locales por región en tiempo real
   useEffect(() => {
-    if (regionSeleccionada) {
-      setLocalesFiltrados(localesTodos.filter(l => l.region_id === regionSeleccionada));
-      setResponsablesFiltrados(responsablesTodos.filter(r => r.region_id === regionSeleccionada));
-    } else {
-      setLocalesFiltrados([]);
-      setResponsablesFiltrados([]);
+    async function fetchLocales() {
+      if (!regionSeleccionada) {
+        setLocalesFiltrados([]);
+        return;
+      }
+
+      setLoading(true);
+      
+      const { data, error } = await supabase
+        .from('locales')
+        .select('id, nombre, region')
+        .eq('region', regionSeleccionada);
+
+      if (error) {
+        console.error('Error al consultar locales:', error.message);
+      } else {
+        setLocalesFiltrados(data || []);
+      }
+      
+      setLocalSeleccionado('');
+      setLoading(false);
     }
-    setLocalSeleccionado('');
-    setResponsableSeleccionado('');
-  }, [regionSeleccionada, localesTodos, responsablesTodos]);
+
+    fetchLocales();
+  }, [regionSeleccionada]);
 
   const handleComenzar = () => {
-    if (!regionSeleccionada || !localSeleccionado || !responsableSeleccionado || !auditorEquipo || !tipoVisita) {
+    if (!regionSeleccionada || !localSeleccionado || !responsableTexto || !auditorEquipo || !tipoVisita) {
       alert('Por favor complete todos los campos obligatorios.');
       return;
     }
 
-    // Navegar al checklist dinámico pasando los filtros como parámetros de URL
+    // Avanzar al flujo del checklist inyectando los parámetros reales
     router.push({
       pathname: `/checklist/auditoria-${Date.now()}`,
       params: {
-        region: regionSeleccionada === 'reg-1' ? 'Región Norte' : 'Región Sur',
+        region: regionSeleccionada,
+        local_id: localSeleccionado,
         visit_type_id: tipoVisita
       }
     });
   };
 
-  const isFormValid = regionSeleccionada && localSeleccionado && responsableSeleccionado && auditorEquipo && tipoVisita;
+  const isFormValid = regionSeleccionada && localSeleccionado && responsableTexto.trim().length > 2 && auditorEquipo.trim().length > 2 && tipoVisita;
 
   return (
     <ScrollView contentContainerStyle={styles.scrollContainer}>
       <View style={styles.card}>
         <Text style={styles.title}>Nueva Auditoría</Text>
         
+        {loading && <ActivityIndicator size="small" color="#0070f3" style={{ marginBottom: 10 }} />}
+
         {/* Desplegable: Región */}
         <Text style={styles.label}>Región Geográfica *</Text>
         <View style={styles.pickerContainer}>
@@ -103,9 +101,9 @@ export default function NuevaAuditoriaPage() {
             selectedValue={regionSeleccionada}
             onValueChange={(itemValue) => setRegionSeleccionada(itemValue)}
           >
-            <option value="">-- Selecciona una Región --</option>
+            <Picker.Item label="-- Selecciona una Región --" value="" />
             {regiones.map(r => (
-              <option key={r.id} value={r.id}>{r.nombre}</option>
+              <Picker.Item key={r.id} label={r.nombre} value={r.id} />
             ))}
           </Picker>
         </View>
@@ -118,27 +116,21 @@ export default function NuevaAuditoriaPage() {
             onValueChange={(itemValue) => setLocalSeleccionado(itemValue)}
             enabled={!!regionSeleccionada}
           >
-            <option value="">{regionSeleccionada ? '-- Selecciona un Local --' : '▲ Selecciona primero una región'}</option>
+            <Picker.Item label={regionSeleccionada ? "-- Selecciona un Local --" : "▲ Selecciona primero una región"} value="" />
             {localesFiltrados.map(l => (
-              <option key={l.id} value={l.id}>{l.nombre}</option>
+              <Picker.Item key={l.id} label={l.nombre} value={l.id} />
             ))}
           </Picker>
         </View>
 
-        {/* Desplegable: Responsable */}
+        {/* Entrada: Responsable */}
         <Text style={styles.label}>Responsable del Local *</Text>
-        <View style={[styles.pickerContainer, !regionSeleccionada && styles.disabledPicker]}>
-          <Picker
-            selectedValue={responsableSeleccionado}
-            onValueChange={(itemValue) => setResponsableSeleccionado(itemValue)}
-            enabled={!!regionSeleccionada}
-          >
-            <option value="">{regionSeleccionada ? '-- Selecciona al Responsable --' : '▲ Selecciona primero una región'}</option>
-            {responsablesFiltrados.map(r => (
-              <option key={r.id} value={r.id}>{r.nombre}</option>
-            ))}
-          </Picker>
-        </View>
+        <TextInput
+          style={styles.input}
+          placeholder="Escriba el nombre completo del responsable..."
+          value={responsableTexto}
+          onChangeText={setResponsableTexto}
+        />
 
         {/* Entrada: Auditor / Equipo */}
         <Text style={styles.label}>Auditor / Equipo Evaluador *</Text>
@@ -156,10 +148,10 @@ export default function NuevaAuditoriaPage() {
             selectedValue={tipoVisita}
             onValueChange={(itemValue) => setTipoVisita(itemValue)}
           >
-            <option value="">-- Selecciona el Tipo --</option>
-            <option value="ordinaria">Ordinaria / Rutina</option>
-            <option value="extraordinaria">Extraordinaria / Sorpresa</option>
-            <option value="seguimiento">Seguimiento de Incidencias</option>
+            <Picker.Item label="-- Selecciona el Tipo --" value="" />
+            <Picker.Item label="Ordinaria / Rutina" value="ordinaria" />
+            <Picker.Item label="Extraordinaria / Sorpresa" value="extraordinaria" />
+            <Picker.Item label="Seguimiento de Incidencias" value="seguimiento" />
           </Picker>
         </View>
 
@@ -181,7 +173,7 @@ const styles = StyleSheet.create({
   card: { backgroundColor: '#fff', padding: 25, borderRadius: 10, width: '100%', maxWidth: 450, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.1, shadowRadius: 8, elevation: 3 },
   title: { fontSize: 24, fontWeight: 'bold', color: '#333', marginBottom: 20, borderBottomWidth: 2, borderBottomColor: '#f0f0f0', paddingBottom: 10 },
   label: { fontSize: 14, fontWeight: '600', color: '#444', marginBottom: 5, marginTop: 10 },
-  pickerContainer: { borderWidth: 1, borderColor: '#ccc', borderRadius: 6, backgroundColor: '#fff', marginBottom: 10 },
+  pickerContainer: { borderWidth: 1, borderColor: '#ccc', borderRadius: 6, backgroundColor: '#fff', marginBottom: 10, overflow: 'hidden' },
   disabledPicker: { backgroundColor: '#eaeaea', borderColor: '#ddd' },
   input: { borderWidth: 1, borderColor: '#ccc', borderRadius: 6, padding: 10, fontSize: 15, backgroundColor: '#fff', marginBottom: 10 },
   button: { backgroundColor: '#10b981', padding: 14, borderRadius: 6, alignItems: 'center', marginTop: 15 },
