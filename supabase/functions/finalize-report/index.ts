@@ -1,21 +1,30 @@
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2"
+import { createClient } from "supabase"
 
 const RESEND_API_KEY = Deno.env.get('RESEND_API_KEY')
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
 
 Deno.serve(async (req) => {
+  const corsHeaders = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  }
+
   // Manejo de peticiones CORS preflight obligatorias para aplicaciones móviles
   if (req.method === 'OPTIONS') {
-    return new Response('ok', { headers: { 'Access-Control-Allow-Origin': '*' } })
+    return new Response('ok', { headers: corsHeaders })
   }
 
   try {
     const { reportId } = await req.json()
     if (!reportId) throw new Error("Falta el parámetro reportId obligatorio.")
 
+    if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+      throw new Error('Faltan SUPABASE_URL o SUPABASE_SERVICE_ROLE_KEY en variables de entorno.')
+    }
+
     // Inicializar cliente administrativo de Supabase
-    const supabase = createClient(SUPABASE_URL!, SUPABASE_SERVICE_ROLE_KEY!)
+    const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
     // 1. Obtener la metadata e información general del reporte finalizado
     const { data: report, error: errReport } = await supabase
@@ -56,7 +65,10 @@ Deno.serve(async (req) => {
 
           if (!errDownload && fileData) {
             const arrayBuffer = await fileData.arrayBuffer()
-            const base64String = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)))
+            let binary = ''
+            const bytes = new Uint8Array(arrayBuffer)
+            for (const byte of bytes) binary += String.fromCharCode(byte)
+            const base64String = btoa(binary)
             const cidName = `evidencia_pregunta_${ans.question_id}`
 
             // Insertar el binario formateado en la matriz de adjuntos de Resend
@@ -138,13 +150,13 @@ Deno.serve(async (req) => {
     const resendData = await resendResponse.json()
 
     return new Response(JSON.stringify({ success: true, data: resendData }), {
-      headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+      headers: { 'Content-Type': 'application/json', ...corsHeaders },
       status: 200,
     })
 
   } catch (error: any) {
     return new Response(JSON.stringify({ success: false, error: error.message }), {
-      headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+      headers: { 'Content-Type': 'application/json', ...corsHeaders },
       status: 500,
     })
   }

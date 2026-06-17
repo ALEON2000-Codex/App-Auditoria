@@ -1,15 +1,17 @@
 import React, { useEffect, useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, TextInput, TouchableOpacity, Switch, ActivityIndicator } from 'react-native';
+import { Picker } from '@react-native-picker/picker';
 import { supabase } from '../../../src/supabaseClient';
 
 interface Question {
   id: string;
   question_text: string;
-  category: string;
+  category?: string;
   region: string;
   visit_type_id: string;
   is_active: boolean;
   score_points: number; // Columna para los puntajes/ponderación de la pregunta
+  evidence_required: boolean;
 }
 
 export default function GestionPreguntasPage() {
@@ -19,10 +21,10 @@ export default function GestionPreguntasPage() {
   // Estados para el Formulario (Crear / Editar)
   const [editingId, setEditingId] = useState<string | null>(null);
   const [text, setText] = useState('');
-  const [category, setCategory] = useState('');
   const [regionSelected, setRegionSelected] = useState('');
-  const [visitType, setVisitType] = useState('ordinaria');
+  const [visitType, setVisitType] = useState('Sabatina');
   const [score, setScore] = useState('1');
+  const [evidenceRequired, setEvidenceRequired] = useState(false);
 
   useEffect(() => {
     fetchQuestions();
@@ -41,17 +43,17 @@ export default function GestionPreguntasPage() {
 
   // ACCIÓN: Crear o Actualizar Pregunta
   const handleSaveQuestion = async () => {
-    if (!text.trim() || !category.trim() || !regionSelected.trim()) {
+    if (!text.trim() || !regionSelected.trim()) {
       alert('Por favor completa todos los campos obligatorios.');
       return;
     }
 
     const payload = {
       question_text: text,
-      category,
       region: regionSelected,
       visit_type_id: visitType,
       score_points: parseFloat(score) || 1,
+      evidence_required: evidenceRequired,
     };
 
     if (editingId) {
@@ -74,9 +76,9 @@ export default function GestionPreguntasPage() {
 
     // Resetear formulario y recargar
     setText('');
-    setCategory('');
     setRegionSelected('');
     setScore('1');
+    setEvidenceRequired(false);
     fetchQuestions();
   };
 
@@ -100,10 +102,10 @@ export default function GestionPreguntasPage() {
   const startEdit = (q: Question) => {
     setEditingId(q.id);
     setText(q.question_text);
-    setCategory(q.category);
     setRegionSelected(q.region);
     setVisitType(q.visit_type_id);
     setScore(String(q.score_points));
+    setEvidenceRequired(q.evidence_required);
   };
 
   if (loading) return <View style={styles.center}><ActivityIndicator size="large" /></View>;
@@ -124,16 +126,18 @@ export default function GestionPreguntasPage() {
         />
         <TextInput 
           style={styles.input} 
-          placeholder="Categoría (ej: Seguridad, Limpieza) *" 
-          value={category} 
-          onChangeText={setCategory}
-        />
-        <TextInput 
-          style={styles.input} 
-          placeholder="Región Geográfica (ej: Costa, Norte) *" 
+          placeholder="Región Geográfica (Costa, Sierra o Global) *" 
           value={regionSelected} 
           onChangeText={setRegionSelected}
         />
+
+        <Text style={styles.miniLabel}>Tipo de visita</Text>
+        <View style={styles.pickerContainer}>
+          <Picker selectedValue={visitType} onValueChange={(value) => setVisitType(value)}>
+            <Picker.Item label="Sabatina" value="Sabatina" />
+            <Picker.Item label="Nocturna" value="Nocturna" />
+          </Picker>
+        </View>
         
         <View style={styles.row}>
           <View style={{ flex: 1 }}>
@@ -146,13 +150,17 @@ export default function GestionPreguntasPage() {
             />
           </View>
         </View>
+        <View style={styles.switchRow}>
+          <Text style={styles.miniLabel}>Requiere evidencia fotográfica</Text>
+          <Switch value={evidenceRequired} onValueChange={setEvidenceRequired} />
+        </View>
 
         <TouchableOpacity style={styles.saveButton} onPress={handleSaveQuestion}>
           <Text style={styles.saveButtonText}>{editingId ? 'Guardar Cambios' : 'Crear Pregunta'}</Text>
         </TouchableOpacity>
         
         {editingId && (
-          <TouchableOpacity style={styles.cancelButton} onPress={() => { setEditingId(null); setText(''); setCategory(''); }}>
+          <TouchableOpacity style={styles.cancelButton} onPress={() => { setEditingId(null); setText(''); }}>
             <Text style={styles.cancelButtonText}>Cancelar Edición</Text>
           </TouchableOpacity>
         )}
@@ -164,7 +172,7 @@ export default function GestionPreguntasPage() {
         <View key={q.id} style={[styles.qCard, !q.is_active && styles.disabledCard]}>
           <View style={{ flex: 1, paddingRight: 10 }}>
             <Text style={styles.qText}>{q.question_text}</Text>
-            <Text style={styles.qMeta}>Cat: {q.category} | Región: {q.region} | Ptos: {q.score_points}</Text>
+            <Text style={styles.qMeta}>Región: {q.region} | Visita: {q.visit_type_id} | Ptos: {q.score_points}</Text>
           </View>
           
           <View style={styles.actionColumn}>
@@ -191,7 +199,9 @@ const styles = StyleSheet.create({
   formCard: { backgroundColor: '#fff', padding: 16, borderRadius: 8, borderWidth: 1, borderColor: '#e2e8f0' },
   formTitle: { fontSize: 16, fontWeight: 'bold', color: '#0f172a', marginBottom: 12 },
   input: { borderWidth: 1, borderColor: '#cbd5e1', borderRadius: 6, padding: 10, fontSize: 14, marginBottom: 10, backgroundColor: '#fff' },
+  pickerContainer: { borderWidth: 1, borderColor: '#cbd5e1', borderRadius: 6, backgroundColor: '#fff', marginBottom: 10, overflow: 'hidden' },
   row: { flexDirection: 'row', gap: 10 },
+  switchRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
   miniLabel: { fontSize: 12, fontWeight: '600', color: '#64748b', marginBottom: 4 },
   saveButton: { backgroundColor: '#0070f3', padding: 12, borderRadius: 6, alignItems: 'center', marginTop: 5 },
   saveButtonText: { color: '#fff', fontWeight: 'bold' },

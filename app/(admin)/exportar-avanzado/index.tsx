@@ -1,12 +1,12 @@
 import React, { useEffect, useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { Picker } from '@react-native-picker/picker';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import { supabase } from '../../../src/supabaseClient';
 
 // Definición estricta de Roles Autorizados para esta descarga
-const ROLES_PERMITIDOS = ['super_admin', 'regional_admin', 'vip'];
+const ROLES_PERMITIDOS = ['super_admin', 'admin'];
 
 interface ReportRow {
   id: string;
@@ -163,7 +163,6 @@ export default function ExportacionAvanzadaPage() {
             <Picker.Item label="Unificar Ambas Regiones (Descarga Completa)" value="TODAS" />
             <Picker.Item label="Solo Región Costa" value="Costa" />
             <Picker.Item label="Solo Región Sierra" value="Sierra" />
-            <Picker.Item label="Solo Región Oriente" value="Oriente" />
           </Picker>
         </View>
 
@@ -175,9 +174,8 @@ export default function ExportacionAvanzadaPage() {
             onValueChange={(val) => setFiltroTipoVisita(val)}
           >
             <Picker.Item label="Todos los Tipos de Visita" value="TODOS" />
-            <Picker.Item label="Ordinaria / Rutina" value="ordinaria" />
-            <Picker.Item label="Extraordinaria / Sorpresa" value="extraordinaria" />
-            <Picker.Item label="Seguimiento Técnico" value="seguimiento" />
+            <Picker.Item label="Sabatina" value="Sabatina" />
+            <Picker.Item label="Nocturna" value="Nocturna" />
           </Picker>
         </View>
 

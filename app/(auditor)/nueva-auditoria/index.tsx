@@ -10,8 +10,8 @@ interface Region {
 }
 
 interface LocalComercial {
-  id: string;
-  nombre: string;
+  codigo_interno: string;
+  nombre_local: string;
   region: string;
 }
 
@@ -35,7 +35,6 @@ export default function NuevaAuditoriaPage() {
     setRegiones([
       { id: 'Costa', nombre: 'Región Costa' },
       { id: 'Sierra', nombre: 'Región Sierra' },
-      { id: 'Oriente', nombre: 'Región Oriente' },
     ]);
     setLoading(false);
   }, []);
@@ -52,7 +51,7 @@ export default function NuevaAuditoriaPage() {
       
       const { data, error } = await supabase
         .from('locales')
-        .select('id, nombre, region')
+        .select('codigo_interno, nombre_local, region')
         .eq('region', regionSeleccionada);
 
       if (error) {
@@ -68,15 +67,43 @@ export default function NuevaAuditoriaPage() {
     fetchLocales();
   }, [regionSeleccionada]);
 
-  const handleComenzar = () => {
+  const handleComenzar = async () => {
     if (!regionSeleccionada || !localSeleccionado || !responsableTexto || !auditorEquipo || !tipoVisita) {
       alert('Por favor complete todos los campos obligatorios.');
       return;
     }
 
+    setLoading(true);
+    const { data: { user }, error: userError } = await supabase.auth.getUser();
+    if (userError || !user) {
+      setLoading(false);
+      alert('No se pudo validar la sesión del auditor.');
+      return;
+    }
+
+    const { data: report, error: reportError } = await supabase
+      .from('audit_reports')
+      .insert([{
+        user_id: user.id,
+        local_codigo: localSeleccionado,
+        region: regionSeleccionada,
+        visit_type_id: tipoVisita,
+        responsible_name: responsableTexto.trim(),
+        auditor_team: auditorEquipo.trim(),
+        status: 'draft',
+      }])
+      .select('id')
+      .single();
+
+    setLoading(false);
+    if (reportError || !report) {
+      alert('No se pudo crear el reporte en Supabase: ' + (reportError?.message || 'sin detalle'));
+      return;
+    }
+
     // Avanzar al flujo del checklist inyectando los parámetros reales
     router.push({
-      pathname: `/checklist/auditoria-${Date.now()}`,
+      pathname: `/checklist/${report.id}`,
       params: {
         region: regionSeleccionada,
         local_id: localSeleccionado,
@@ -118,7 +145,7 @@ export default function NuevaAuditoriaPage() {
           >
             <Picker.Item label={regionSeleccionada ? "-- Selecciona un Local --" : "▲ Selecciona primero una región"} value="" />
             {localesFiltrados.map(l => (
-              <Picker.Item key={l.id} label={l.nombre} value={l.id} />
+              <Picker.Item key={l.codigo_interno} label={l.nombre_local} value={l.codigo_interno} />
             ))}
           </Picker>
         </View>
@@ -149,9 +176,8 @@ export default function NuevaAuditoriaPage() {
             onValueChange={(itemValue) => setTipoVisita(itemValue)}
           >
             <Picker.Item label="-- Selecciona el Tipo --" value="" />
-            <Picker.Item label="Ordinaria / Rutina" value="ordinaria" />
-            <Picker.Item label="Extraordinaria / Sorpresa" value="extraordinaria" />
-            <Picker.Item label="Seguimiento de Incidencias" value="seguimiento" />
+            <Picker.Item label="Sabatina" value="Sabatina" />
+            <Picker.Item label="Nocturna" value="Nocturna" />
           </Picker>
         </View>
 
@@ -159,8 +185,8 @@ export default function NuevaAuditoriaPage() {
         <TouchableOpacity 
           style={[styles.button, !isFormValid && styles.disabledButton]} 
           onPress={handleComenzar}
-          disabled={!isFormValid}
-        >
+        disabled={!isFormValid}
+      >
           <Text style={styles.buttonText}>Comenzar Auditoría 📝</Text>
         </TouchableOpacity>
       </View>

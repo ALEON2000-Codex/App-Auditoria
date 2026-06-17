@@ -9,7 +9,7 @@ import { offlineStorage } from '../../../../src/offlineStorage';
 interface Question {
   id: string;
   question_text: string;
-  category: string;
+  category?: string;
   region: string;
   visit_type_id: string;
   is_active: boolean;
@@ -58,9 +58,9 @@ export default function ChecklistDinamicoPage() {
       const { data, error: supabaseError } = await supabase
         .from('checklist_questions')
         .select('*')
-        .eq('region', region)
         .eq('visit_type_id', visit_type_id)
-        .eq('is_active', true);
+        .eq('is_active', true)
+        .in('region', [String(region), 'Global']);
 
       if (supabaseError) {
         setError(supabaseError.message);
@@ -182,10 +182,40 @@ export default function ChecklistDinamicoPage() {
       return;
     }
 
-    // Aquí irá la sincronización a Supabase en la Parte 2
+    const payload = questions.map((q) => ({
+      report_id: reportId,
+      question_id: q.id,
+      value: answers[q.id].value,
+      observation: answers[q.id].observation.trim(),
+      evidence_url: answers[q.id].evidenceUrl || null,
+    }));
+
+    const { error: deleteError } = await supabase
+      .from('audit_answers_draft')
+      .delete()
+      .eq('report_id', reportId);
+
+    if (deleteError) {
+      alert('No se pudo limpiar el borrador remoto anterior: ' + deleteError.message);
+      setIsSubmitting(false);
+      return;
+    }
+
+    const { error: insertError } = await supabase
+      .from('audit_answers_draft')
+      .insert(payload);
+
+    if (insertError) {
+      alert('No se pudo guardar el checklist en Supabase: ' + insertError.message);
+      setIsSubmitting(false);
+      return;
+    }
+
     await offlineStorage.clearDraft(String(reportId));
-    alert('¡Auditoría subida a la nube exitosamente!');
-    router.replace('/nueva-auditoria');
+    router.push({
+      pathname: `/conclusiones/${reportId}`,
+      params: { region },
+    });
     setIsSubmitting(false);
   };
 
