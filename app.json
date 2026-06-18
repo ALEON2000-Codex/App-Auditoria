@@ -6,7 +6,6 @@
     "orientation": "portrait",
     "plugins": [
       "expo-router",
-      "expo-status-bar",
       "expo-sharing"
     ],
     "web": {
