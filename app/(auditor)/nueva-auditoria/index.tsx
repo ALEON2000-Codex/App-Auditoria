@@ -1,83 +1,237 @@
-import { useState, useEffect } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'expo-router';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, ActivityIndicator } from 'react-native';
+import { ActivityIndicator, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/datetimepicker';
 import { Picker } from '@react-native-picker/picker';
 import { supabase } from '../../../src/supabaseClient';
+import { listActiveResponsibles, searchResponsibles } from '../../../src/services/responsiblesService';
 
-interface Region {
-  id: string;
-  nombre: string;
-}
+type ProfileRow = {
+  full_name: string;
+  role: 'auditor' | 'admin' | 'super_admin';
+  region: string;
+};
 
-interface LocalComercial {
+type LocalComercial = {
   codigo_interno: string;
   nombre_local: string;
   region: string;
+};
+
+type ResponsableOption = {
+  id: string;
+  codigo: string;
+  nombre: string;
+  cargo: string | null;
+  region: string | null;
+};
+
+const visitTypes = ['Sabatina', 'Nocturna'];
+const maxVisibleOptions = 6;
+
+function pad(value: number) {
+  return String(value).padStart(2, '0');
+}
+
+function dateToIsoDate(date: Date) {
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function dateToTime(date: Date) {
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function normalize(value: string) {
+  return value
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
 }
 
 export default function NuevaAuditoriaPage() {
   const router = useRouter();
 
-  // Estados de control
+  const now = useMemo(() => new Date(), []);
+  const [profile, setProfile] = useState<ProfileRow | null>(null);
+  const [locales, setLocales] = useState<LocalComercial[]>([]);
+  const [responsables, setResponsables] = useState<ResponsableOption[]>([]);
   const [loading, setLoading] = useState(true);
-  const [regiones, setRegiones] = useState<Region[]>([]);
-  const [localesFiltrados, setLocalesFiltrados] = useState<LocalComercial[]>([]);
+  const [isCreating, setIsCreating] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
 
-  // Estados del Formulario
-  const [regionSeleccionada, setRegionSeleccionada] = useState('');
-  const [localSeleccionado, setLocalSeleccionado] = useState('');
-  const [responsableTexto, setResponsableTexto] = useState('');
-  const [auditorEquipo, setAuditorEquipo] = useState('');
   const [tipoVisita, setTipoVisita] = useState('');
+  const [localQuery, setLocalQuery] = useState('');
+  const [localSeleccionado, setLocalSeleccionado] = useState<LocalComercial | null>(null);
+  const [responsableQuery, setResponsableQuery] = useState('');
+  const [responsableSeleccionado, setResponsableSeleccionado] = useState<ResponsableOption | null>(null);
+  const [fechaInicio, setFechaInicio] = useState(dateToIsoDate(now));
+  const [horaInicio, setHoraInicio] = useState(dateToTime(now));
+  const [showDatePicker, setShowDatePicker] = useState(false);
+  const [showTimePicker, setShowTimePicker] = useState(false);
+  const [localSearchOpen, setLocalSearchOpen] = useState(false);
+  const [responsableSearchOpen, setResponsableSearchOpen] = useState(false);
 
-  // 1. CARGA INICIAL: Regiones corporativas
   useEffect(() => {
-    setRegiones([
-      { id: 'Costa', nombre: 'Región Costa' },
-      { id: 'Sierra', nombre: 'Región Sierra' },
-    ]);
-    setLoading(false);
+    loadInitialData();
   }, []);
 
-  // 2. CONSULTA DIRECTA A SUPABASE: Filtra locales por región en tiempo real
-  useEffect(() => {
-    async function fetchLocales() {
-      if (!regionSeleccionada) {
-        setLocalesFiltrados([]);
-        return;
-      }
+  const loadInitialData = async () => {
+    setLoading(true);
+    setMessage(null);
 
-      setLoading(true);
-      
-      const { data, error } = await supabase
-        .from('locales')
-        .select('codigo_interno, nombre_local, region')
-        .eq('region', regionSeleccionada);
-
-      if (error) {
-        console.error('Error al consultar locales:', error.message);
-      } else {
-        setLocalesFiltrados(data || []);
-      }
-      
-      setLocalSeleccionado('');
+    const { data: { user }, error: userError } = await supabase.auth.getUser();
+    if (userError || !user) {
+      setMessage('No se pudo validar la sesion.');
       setLoading(false);
-    }
-
-    fetchLocales();
-  }, [regionSeleccionada]);
-
-  const handleComenzar = async () => {
-    if (!regionSeleccionada || !localSeleccionado || !responsableTexto || !auditorEquipo || !tipoVisita) {
-      alert('Por favor complete todos los campos obligatorios.');
       return;
     }
 
-    setLoading(true);
+    const { data: profileData, error: profileError } = await supabase
+      .from('profiles')
+      .select('full_name, role, region')
+      .eq('id', user.id)
+      .single<ProfileRow>();
+
+    if (profileError || !profileData) {
+      setMessage('No se encontro el perfil del auditor.');
+      setLoading(false);
+      return;
+    }
+
+    setProfile(profileData);
+
+    let localQueryBuilder = supabase
+      .from('locales')
+      .select('codigo_interno, nombre_local, region')
+      .order('nombre_local', { ascending: true });
+
+    if (profileData.role !== 'super_admin' && profileData.region !== 'Global') {
+      localQueryBuilder = localQueryBuilder.eq('region', profileData.region);
+    }
+
+    const { data: localData, error: localError } = await localQueryBuilder;
+
+    if (localError) {
+      setMessage('No se pudieron cargar los locales: ' + localError.message);
+    } else {
+      setLocales(localData || []);
+    }
+
+    const { data: responsibleData, error: responsibleError } = await listActiveResponsibles(profileData.role, profileData.region);
+
+    if (responsibleError) {
+      setMessage('No se pudieron cargar los responsables: ' + responsibleError.message);
+    } else {
+      setResponsables((responsibleData || []).map(mapResponsibleRow));
+    }
+
+    setLoading(false);
+  };
+
+  const filteredLocales = useMemo(() => {
+    const term = normalize(localQuery);
+    const source = term
+      ? locales.filter((local) =>
+          normalize(`${local.codigo_interno} ${local.nombre_local} ${local.region}`).includes(term),
+        )
+      : locales;
+
+    return source.slice(0, maxVisibleOptions);
+  }, [localQuery, locales]);
+
+  const filteredResponsables = useMemo(() => {
+    const term = normalize(responsableQuery);
+    const source = term
+      ? responsables.filter((responsable) =>
+          normalize(`${responsable.codigo} ${responsable.nombre} ${responsable.region || ''}`).includes(term),
+        )
+      : responsables;
+
+    return source.slice(0, maxVisibleOptions);
+  }, [responsableQuery, responsables]);
+
+  const regionVisita = localSeleccionado?.region || (profile?.region === 'Global' ? '' : profile?.region || '');
+  const responsableCompleto = responsableSeleccionado
+    ? `${responsableSeleccionado.codigo} - ${responsableSeleccionado.nombre}`
+    : '';
+
+  const isFormValid =
+    Boolean(tipoVisita) &&
+    Boolean(localSeleccionado) &&
+    Boolean(responsableSeleccionado?.id) &&
+    Boolean(fechaInicio.trim()) &&
+    Boolean(horaInicio.trim());
+
+  const selectedDate = useMemo(() => {
+    const date = new Date(`${fechaInicio}T${horaInicio || '00:00'}:00`);
+    return Number.isNaN(date.getTime()) ? new Date() : date;
+  }, [fechaInicio, horaInicio]);
+
+  const handleDateChange = (_event: DateTimePickerEvent, date?: Date) => {
+    if (Platform.OS !== 'ios') setShowDatePicker(false);
+    if (date) setFechaInicio(dateToIsoDate(date));
+  };
+
+  const handleTimeChange = (_event: DateTimePickerEvent, date?: Date) => {
+    if (Platform.OS !== 'ios') setShowTimePicker(false);
+    if (date) setHoraInicio(dateToTime(date));
+  };
+
+  const handleLocalSearch = (value: string) => {
+    setLocalQuery(value);
+    setLocalSeleccionado(null);
+  };
+
+  const handleResponsableSearch = (value: string) => {
+    setResponsableQuery(value);
+    setResponsableSeleccionado(null);
+  };
+
+  useEffect(() => {
+    if (!profile || !responsableSearchOpen) return;
+
+    const timeout = setTimeout(async () => {
+      const { data, error } = await searchResponsibles(responsableQuery, profile.role, profile.region);
+
+      if (!error) {
+        setResponsables((data || []).map(mapResponsibleRow));
+      }
+    }, 250);
+
+    return () => clearTimeout(timeout);
+  }, [profile, responsableQuery, responsableSearchOpen]);
+
+  const selectLocal = (local: LocalComercial) => {
+    setLocalSeleccionado(local);
+    setLocalQuery(`${local.codigo_interno} · ${local.nombre_local}`);
+    setLocalSearchOpen(false);
+  };
+
+  const selectResponsable = (responsable: ResponsableOption) => {
+    setResponsableSeleccionado(responsable);
+    setResponsableQuery(`${responsable.codigo} · ${responsable.nombre}`);
+    setResponsableSearchOpen(false);
+  };
+
+  const handleCrearVisita = async () => {
+    if (!isFormValid) {
+      setMessage('Completa tipo de visita, local, responsable, fecha y hora de inicio.');
+      return;
+    }
+
+    const startDate = new Date(`${fechaInicio}T${horaInicio}:00`);
+    if (Number.isNaN(startDate.getTime())) {
+      setMessage('Revisa la fecha u hora de inicio.');
+      return;
+    }
+
+    setIsCreating(true);
+    setMessage(null);
+
     const { data: { user }, error: userError } = await supabase.auth.getUser();
     if (userError || !user) {
-      setLoading(false);
-      alert('No se pudo validar la sesión del auditor.');
+      setMessage('No se pudo validar la sesion.');
+      setIsCreating(false);
       return;
     }
 
@@ -85,124 +239,465 @@ export default function NuevaAuditoriaPage() {
       .from('audit_reports')
       .insert([{
         user_id: user.id,
-        local_codigo: localSeleccionado,
-        region: regionSeleccionada,
+        local_codigo: localSeleccionado?.codigo_interno,
+        region: regionVisita,
         visit_type_id: tipoVisita,
-        responsible_name: responsableTexto.trim(),
-        auditor_team: auditorEquipo.trim(),
+        responsible_id: responsableSeleccionado?.id,
+        responsible_code: responsableSeleccionado?.codigo,
+        responsible_name_snapshot: responsableSeleccionado?.nombre,
+        responsible_name: responsableCompleto,
+        local_code_snapshot: localSeleccionado?.codigo_interno,
+        local_name_snapshot: localSeleccionado?.nombre_local,
+        auditor_name_snapshot: profile?.full_name || 'Auditor',
+        auditor_team: profile?.full_name || 'Auditor',
+        start_date: fechaInicio,
+        start_time: horaInicio,
         status: 'draft',
+        created_at: startDate.toISOString(),
       }])
       .select('id')
       .single();
 
-    setLoading(false);
+    setIsCreating(false);
+
     if (reportError || !report) {
-      alert('No se pudo crear el reporte en Supabase: ' + (reportError?.message || 'sin detalle'));
+      setMessage('No se pudo crear la visita: ' + (reportError?.message || 'sin detalle'));
       return;
     }
 
-    // Avanzar al flujo del checklist inyectando los parámetros reales
     router.push({
       pathname: `/checklist/${report.id}`,
       params: {
-        region: regionSeleccionada,
-        local_id: localSeleccionado,
-        visit_type_id: tipoVisita
-      }
+        region: regionVisita,
+        local_id: localSeleccionado?.codigo_interno || '',
+        visit_type_id: tipoVisita,
+      },
     });
   };
 
-  const isFormValid = regionSeleccionada && localSeleccionado && responsableTexto.trim().length > 2 && auditorEquipo.trim().length > 2 && tipoVisita;
+  if (loading) {
+    return (
+      <View style={styles.center}>
+        <ActivityIndicator size="large" color="#0f766e" />
+        <Text style={styles.loadingText}>Preparando nueva visita...</Text>
+      </View>
+    );
+  }
 
   return (
-    <ScrollView contentContainerStyle={styles.scrollContainer}>
-      <View style={styles.card}>
-        <Text style={styles.title}>Nueva Auditoría</Text>
-        
-        {loading && <ActivityIndicator size="small" color="#0070f3" style={{ marginBottom: 10 }} />}
-
-        {/* Desplegable: Región */}
-        <Text style={styles.label}>Región Geográfica *</Text>
-        <View style={styles.pickerContainer}>
-          <Picker
-            selectedValue={regionSeleccionada}
-            onValueChange={(itemValue) => setRegionSeleccionada(itemValue)}
-          >
-            <Picker.Item label="-- Selecciona una Región --" value="" />
-            {regiones.map(r => (
-              <Picker.Item key={r.id} label={r.nombre} value={r.id} />
-            ))}
-          </Picker>
-        </View>
-
-        {/* Desplegable: Local Comercial */}
-        <Text style={styles.label}>Local Comercial *</Text>
-        <View style={[styles.pickerContainer, !regionSeleccionada && styles.disabledPicker]}>
-          <Picker
-            selectedValue={localSeleccionado}
-            onValueChange={(itemValue) => setLocalSeleccionado(itemValue)}
-            enabled={!!regionSeleccionada}
-          >
-            <Picker.Item label={regionSeleccionada ? "-- Selecciona un Local --" : "▲ Selecciona primero una región"} value="" />
-            {localesFiltrados.map(l => (
-              <Picker.Item key={l.codigo_interno} label={l.nombre_local} value={l.codigo_interno} />
-            ))}
-          </Picker>
-        </View>
-
-        {/* Entrada: Responsable */}
-        <Text style={styles.label}>Responsable del Local *</Text>
-        <TextInput
-          style={styles.input}
-          placeholder="Escriba el nombre completo del responsable..."
-          value={responsableTexto}
-          onChangeText={setResponsableTexto}
-        />
-
-        {/* Entrada: Auditor / Equipo */}
-        <Text style={styles.label}>Auditor / Equipo Evaluador *</Text>
-        <TextInput
-          style={styles.input}
-          placeholder="Ej: Juan Pérez / Equipo Control"
-          value={auditorEquipo}
-          onChangeText={setAuditorEquipo}
-        />
-
-        {/* Desplegable: Tipo de Visita */}
-        <Text style={styles.label}>Tipo de Visita *</Text>
-        <View style={styles.pickerContainer}>
-          <Picker
-            selectedValue={tipoVisita}
-            onValueChange={(itemValue) => setTipoVisita(itemValue)}
-          >
-            <Picker.Item label="-- Selecciona el Tipo --" value="" />
-            <Picker.Item label="Sabatina" value="Sabatina" />
-            <Picker.Item label="Nocturna" value="Nocturna" />
-          </Picker>
-        </View>
-
-        {/* Botón de Envío */}
-        <TouchableOpacity 
-          style={[styles.button, !isFormValid && styles.disabledButton]} 
-          onPress={handleComenzar}
-        disabled={!isFormValid}
-      >
-          <Text style={styles.buttonText}>Comenzar Auditoría 📝</Text>
-        </TouchableOpacity>
+    <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
+      <View style={styles.header}>
+        <Text style={styles.eyebrow}>Flujo de visitas</Text>
+        <Text style={styles.title}>Nueva auditoria</Text>
+        <Text style={styles.subtitle}>Configura la visita antes de abrir el checklist correspondiente.</Text>
       </View>
+
+      {message && (
+        <View style={styles.messageBox}>
+          <Text style={styles.messageText}>{message}</Text>
+        </View>
+      )}
+
+      <FormSection step="1" title="Tipo, fecha y hora">
+        <Text style={styles.label}>Tipo de visita</Text>
+        <View style={styles.pickerShell}>
+          <Picker selectedValue={tipoVisita} onValueChange={setTipoVisita}>
+            <Picker.Item label="Selecciona el tipo" value="" />
+            {visitTypes.map((type) => (
+              <Picker.Item key={type} label={type} value={type} />
+            ))}
+          </Picker>
+        </View>
+
+        <View style={styles.dateTimeGrid}>
+          <DateTimeField
+            label="Fecha de inicio"
+            value={fechaInicio}
+            mode="date"
+            selectedDate={selectedDate}
+            visible={showDatePicker}
+            onOpen={() => setShowDatePicker(true)}
+            onChange={handleDateChange}
+            onWebChange={setFechaInicio}
+          />
+
+          <DateTimeField
+            label="Hora de inicio"
+            value={horaInicio}
+            mode="time"
+            selectedDate={selectedDate}
+            visible={showTimePicker}
+            onOpen={() => setShowTimePicker(true)}
+            onChange={handleTimeChange}
+            onWebChange={setHoraInicio}
+          />
+        </View>
+      </FormSection>
+
+      <FormSection step="2" title="Local">
+        <OverlaySelectTrigger
+          label="Buscar local por codigo o nombre"
+          placeholder="Ej: GM o Malecon"
+          value={localQuery}
+          onOpen={() => setLocalSearchOpen(true)}
+          selected={Boolean(localSeleccionado)}
+        />
+      </FormSection>
+
+      <FormSection step="3" title="Responsable">
+        <OverlaySelectTrigger
+          label="Buscar responsable por codigo o nombre"
+          placeholder="Ej: L001 o Maria"
+          value={responsableQuery}
+          onOpen={() => setResponsableSearchOpen(true)}
+          selected={Boolean(responsableSeleccionado)}
+        />
+
+        <View style={styles.twoColumns}>
+          <TextInput
+            style={styles.input}
+            placeholder="Codigo"
+            editable={false}
+            value={responsableSeleccionado?.codigo || parseResponsibleDraft(responsableQuery).codigo}
+            onChangeText={(value) => {
+              const parsed = parseResponsibleDraft(responsableQuery);
+              const next = { id: '', codigo: value.toUpperCase(), nombre: parsed.nombre, cargo: null, region: null };
+              setResponsableSeleccionado(next.codigo || next.nombre ? next : null);
+              setResponsableQuery(`${next.codigo}${next.nombre ? ` · ${next.nombre}` : ''}`);
+              setResponsableSearchOpen(false);
+            }}
+            autoCapitalize="characters"
+          />
+          <TextInput
+            style={styles.input}
+            placeholder="Nombre"
+            editable={false}
+            value={responsableSeleccionado?.nombre || parseResponsibleDraft(responsableQuery).nombre}
+            onChangeText={(value) => {
+              const parsed = parseResponsibleDraft(responsableQuery);
+              const next = { id: '', codigo: parsed.codigo, nombre: value, cargo: null, region: null };
+              setResponsableSeleccionado(next.codigo || next.nombre ? next : null);
+              setResponsableQuery(`${next.codigo}${next.nombre ? ` · ${next.nombre}` : ''}`);
+              setResponsableSearchOpen(false);
+            }}
+          />
+        </View>
+      </FormSection>
+
+      <FormSection step="4" title="Confirmacion">
+        <View style={styles.confirmCard}>
+          <InfoRow label="Tipo de visita" value={tipoVisita || 'Pendiente'} />
+          <InfoRow label="Local" value={localSeleccionado?.nombre_local || 'Pendiente'} />
+          <InfoRow label="Codigo local" value={localSeleccionado?.codigo_interno || 'Pendiente'} />
+          <InfoRow label="Region" value={regionVisita || 'Pendiente'} />
+          <InfoRow label="Responsable" value={responsableSeleccionado?.nombre || 'Pendiente'} />
+          <InfoRow label="Codigo responsable" value={responsableSeleccionado?.codigo || 'Pendiente'} />
+          <InfoRow label="Auditor" value={profile?.full_name || 'Sin auditor'} />
+          <InfoRow label="Fecha" value={fechaInicio || 'Pendiente'} />
+          <InfoRow label="Hora" value={horaInicio || 'Pendiente'} />
+        </View>
+      </FormSection>
+
+      <TouchableOpacity
+        style={[styles.createButton, (!isFormValid || isCreating) && styles.createButtonDisabled]}
+        onPress={handleCrearVisita}
+        disabled={!isFormValid || isCreating}
+      >
+        <Text style={styles.createButtonText}>{isCreating ? 'Creando visita...' : 'Crear visita'}</Text>
+      </TouchableOpacity>
+
+      <SearchOverlay
+        visible={localSearchOpen}
+        title="Seleccionar local"
+        searchLabel="Buscar por codigo o nombre"
+        placeholder="Ej: GM o Malecon"
+        query={localQuery}
+        onQueryChange={handleLocalSearch}
+        onClose={() => setLocalSearchOpen(false)}
+        emptyText="No hay locales que coincidan."
+      >
+        {filteredLocales.map((local) => (
+          <TouchableOpacity key={local.codigo_interno} style={styles.optionCard} onPress={() => selectLocal(local)}>
+            <Text style={styles.optionTitle}>{local.codigo_interno} · {local.nombre_local}</Text>
+            <Text style={styles.optionMeta}>Region {local.region}</Text>
+          </TouchableOpacity>
+        ))}
+      </SearchOverlay>
+
+      <SearchOverlay
+        visible={responsableSearchOpen}
+        title="Seleccionar responsable"
+        searchLabel="Buscar por codigo o nombre"
+        placeholder="Ej: L001 o Maria"
+        query={responsableQuery}
+        onQueryChange={handleResponsableSearch}
+        onClose={() => setResponsableSearchOpen(false)}
+        emptyText="No hay responsables activos que coincidan."
+      >
+        {filteredResponsables.map((responsable) => (
+          <TouchableOpacity key={responsable.id} style={styles.optionCard} onPress={() => selectResponsable(responsable)}>
+            <Text style={styles.optionTitle}>{responsable.codigo} · {responsable.nombre}</Text>
+          </TouchableOpacity>
+        ))}
+      </SearchOverlay>
     </ScrollView>
   );
 }
 
+function DateTimeField({
+  label,
+  value,
+  mode,
+  selectedDate,
+  visible,
+  onOpen,
+  onChange,
+  onWebChange,
+}: {
+  label: string;
+  value: string;
+  mode: 'date' | 'time';
+  selectedDate: Date;
+  visible: boolean;
+  onOpen: () => void;
+  onChange: (event: DateTimePickerEvent, date?: Date) => void;
+  onWebChange: (value: string) => void;
+}) {
+  if (Platform.OS === 'web') {
+    return (
+      <View style={styles.dateTimeItem}>
+        <Text style={styles.label}>{label}</Text>
+        {React.createElement('input', {
+          type: mode,
+          value,
+          onChange: (event: React.ChangeEvent<HTMLInputElement>) => onWebChange(event.target.value),
+          style: webInputStyle,
+        })}
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.dateTimeItem}>
+      <Text style={styles.label}>{label}</Text>
+      <TouchableOpacity style={styles.clockButton} onPress={onOpen}>
+        <Text style={styles.clockValue}>{value}</Text>
+        <Text style={styles.clockHint}>{mode === 'date' ? 'Abrir calendario' : 'Abrir reloj'}</Text>
+      </TouchableOpacity>
+      {visible && (
+        <DateTimePicker
+          value={selectedDate}
+          mode={mode}
+          display={mode === 'date' ? 'calendar' : 'clock'}
+          onChange={onChange}
+          is24Hour
+        />
+      )}
+    </View>
+  );
+}
+
+function FormSection({ step, title, children }: { step: string; title: string; children: React.ReactNode }) {
+  return (
+    <View style={styles.section}>
+      <View style={styles.sectionHeader}>
+        <View style={styles.stepCircle}>
+          <Text style={styles.stepText}>{step}</Text>
+        </View>
+        <Text style={styles.sectionTitle}>{title}</Text>
+      </View>
+      {children}
+    </View>
+  );
+}
+
+function OverlaySelectTrigger({
+  label,
+  placeholder,
+  value,
+  onOpen,
+  selected,
+}: {
+  label: string;
+  placeholder: string;
+  value: string;
+  onOpen: () => void;
+  selected: boolean;
+}) {
+  return (
+    <View>
+      <Text style={styles.label}>{label}</Text>
+      <TouchableOpacity style={[styles.searchInput, selected && styles.searchInputSelected]} onPress={onOpen}>
+        <Text style={[styles.triggerText, !value && styles.triggerPlaceholder]}>{value || placeholder}</Text>
+      </TouchableOpacity>
+    </View>
+  );
+}
+
+function SearchOverlay({
+  visible,
+  title,
+  searchLabel,
+  placeholder,
+  query,
+  onQueryChange,
+  onClose,
+  emptyText,
+  children,
+}: {
+  visible: boolean;
+  title: string;
+  searchLabel: string;
+  placeholder: string;
+  query: string;
+  onQueryChange: (value: string) => void;
+  onClose: () => void;
+  emptyText: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <View style={styles.modalBackdrop}>
+        <View style={styles.modalCard}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>{title}</Text>
+            <TouchableOpacity style={styles.modalCloseButton} onPress={onClose}>
+              <Text style={styles.modalCloseText}>Cerrar</Text>
+            </TouchableOpacity>
+          </View>
+          <Text style={styles.label}>{searchLabel}</Text>
+          <TextInput
+            style={styles.modalSearchInput}
+            placeholder={placeholder}
+            value={query}
+            onChangeText={onQueryChange}
+            autoFocus={Platform.OS === 'web'}
+          />
+          <ScrollView style={styles.modalOptions} keyboardShouldPersistTaps="handled">
+            {React.Children.count(children) > 0 ? children : <Text style={styles.emptyText}>{emptyText}</Text>}
+          </ScrollView>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function InfoRow({ label, value }: { label: string; value: string }) {
+  return (
+    <View style={styles.infoRow}>
+      <Text style={styles.infoLabel}>{label}</Text>
+      <Text style={styles.infoValue}>{value}</Text>
+    </View>
+  );
+}
+
+function buildResponsableOptions(rows: { responsible_name: string | null }[]) {
+  const seen = new Map<string, Pick<ResponsableOption, 'codigo' | 'nombre'>>();
+
+  for (const row of rows) {
+    if (!row.responsible_name) continue;
+    const parsed = parseStoredResponsible(row.responsible_name);
+    if (!parsed.codigo && !parsed.nombre) continue;
+    seen.set(`${parsed.codigo}-${parsed.nombre}`, parsed);
+  }
+
+  return Array.from(seen.values()).sort((a, b) => a.nombre.localeCompare(b.nombre));
+}
+
+function parseStoredResponsible(value: string): Pick<ResponsableOption, 'codigo' | 'nombre'> {
+  const parts = value.split(' - ');
+  if (parts.length >= 2) {
+    return { codigo: parts[0].trim(), nombre: parts.slice(1).join(' - ').trim() };
+  }
+
+  return { codigo: 'SIN-CODIGO', nombre: value.trim() };
+}
+
+function parseResponsibleDraft(value: string): Pick<ResponsableOption, 'codigo' | 'nombre'> {
+  const cleaned = value.replace('·', '-');
+  const parts = cleaned.split('-');
+  return {
+    codigo: (parts[0] || '').trim().toUpperCase(),
+    nombre: (parts.slice(1).join('-') || '').trim(),
+  };
+}
+
+function mapResponsibleRow(row: {
+  id: string;
+  responsible_code: string;
+  responsible_name: string;
+  position: string | null;
+  region: string | null;
+}): ResponsableOption {
+  return {
+    id: row.id,
+    codigo: row.responsible_code,
+    nombre: row.responsible_name,
+    cargo: row.position,
+    region: row.region,
+  };
+}
+
+const webInputStyle = {
+  width: '100%',
+  height: 46,
+  border: '1px solid #cbd5e1',
+  borderRadius: 8,
+  boxSizing: 'border-box',
+  padding: '0 10px',
+  fontSize: 14,
+  fontWeight: 800,
+  color: '#111827',
+  backgroundColor: '#fff',
+};
+
 const styles = StyleSheet.create({
-  scrollContainer: { padding: 20, justifyContent: 'center', alignItems: 'center', backgroundColor: '#f5f5f5', minHeight: '100%' },
-  card: { backgroundColor: '#fff', padding: 25, borderRadius: 10, width: '100%', maxWidth: 450, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.1, shadowRadius: 8, elevation: 3 },
-  title: { fontSize: 24, fontWeight: 'bold', color: '#333', marginBottom: 20, borderBottomWidth: 2, borderBottomColor: '#f0f0f0', paddingBottom: 10 },
-  label: { fontSize: 14, fontWeight: '600', color: '#444', marginBottom: 5, marginTop: 10 },
-  pickerContainer: { borderWidth: 1, borderColor: '#ccc', borderRadius: 6, backgroundColor: '#fff', marginBottom: 10, overflow: 'hidden' },
-  disabledPicker: { backgroundColor: '#eaeaea', borderColor: '#ddd' },
-  input: { borderWidth: 1, borderColor: '#ccc', borderRadius: 6, padding: 10, fontSize: 15, backgroundColor: '#fff', marginBottom: 10 },
-  button: { backgroundColor: '#10b981', padding: 14, borderRadius: 6, alignItems: 'center', marginTop: 15 },
-  disabledButton: { backgroundColor: '#a7f3d0', opacity: 0.7 },
-  buttonText: { color: '#fff', fontSize: 16, fontWeight: 'bold' }
+  container: { padding: 18, paddingBottom: 40, backgroundColor: '#f3f6f8', width: '100%', maxWidth: 760, alignSelf: 'center' },
+  center: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 30, backgroundColor: '#f8fafc' },
+  loadingText: { marginTop: 8, color: '#64748b' },
+  header: { backgroundColor: '#fff', borderWidth: 1, borderColor: '#dde5eb', borderRadius: 8, padding: 18, marginBottom: 14 },
+  eyebrow: { fontSize: 12, color: '#0f766e', fontWeight: '900', textTransform: 'uppercase' },
+  title: { fontSize: 25, fontWeight: '900', color: '#111827', marginTop: 4 },
+  subtitle: { fontSize: 13, color: '#64748b', marginTop: 5, lineHeight: 18 },
+  messageBox: { backgroundColor: '#fff7ed', borderWidth: 1, borderColor: '#fed7aa', borderRadius: 8, padding: 12, marginBottom: 14 },
+  messageText: { color: '#9a3412', fontWeight: '700' },
+  section: { backgroundColor: '#fff', borderWidth: 1, borderColor: '#dde5eb', borderRadius: 8, padding: 16, marginBottom: 14 },
+  sectionHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 14, gap: 10 },
+  stepCircle: { width: 30, height: 30, borderRadius: 15, backgroundColor: '#ccfbf1', alignItems: 'center', justifyContent: 'center' },
+  stepText: { color: '#0f766e', fontWeight: '900' },
+  sectionTitle: { fontSize: 16, fontWeight: '900', color: '#111827' },
+  label: { fontSize: 12, fontWeight: '900', color: '#475569', marginBottom: 6 },
+  pickerShell: { minHeight: 52, borderWidth: 1, borderColor: '#cbd5e1', borderRadius: 7, overflow: 'hidden', backgroundColor: '#fff', marginBottom: 14 },
+  dateTimeGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 2 },
+  dateTimeItem: { flex: 1, minWidth: 145 },
+  clockButton: { minHeight: 62, borderWidth: 1, borderColor: '#cbd5e1', borderRadius: 8, backgroundColor: '#f8fafc', paddingHorizontal: 12, justifyContent: 'center' },
+  clockValue: { fontSize: 19, fontWeight: '900', color: '#111827' },
+  clockHint: { fontSize: 11, fontWeight: '700', color: '#0f766e', marginTop: 2 },
+  searchInput: { minHeight: 54, borderWidth: 1, borderColor: '#cbd5e1', borderRadius: 8, paddingHorizontal: 12, backgroundColor: '#fff', fontSize: 15, marginBottom: 8 },
+  searchInputSelected: { borderColor: '#0f766e', backgroundColor: '#f0fdfa' },
+  triggerText: { color: '#111827', fontSize: 15, fontWeight: '800' },
+  triggerPlaceholder: { color: '#94a3b8', fontWeight: '700' },
+  helperText: { color: '#64748b', fontSize: 12, fontWeight: '700', lineHeight: 17, marginTop: 4 },
+  optionsList: { gap: 8 },
+  optionCard: { borderWidth: 1, borderColor: '#dde5eb', borderRadius: 8, padding: 12, backgroundColor: '#f8fafc' },
+  optionTitle: { color: '#111827', fontWeight: '900', fontSize: 14 },
+  optionMeta: { color: '#64748b', fontWeight: '700', fontSize: 12, marginTop: 3 },
+  emptyText: { color: '#64748b', fontStyle: 'italic', paddingVertical: 8 },
+  twoColumns: { flexDirection: 'row', gap: 10, marginTop: 12 },
+  input: { flex: 1, minHeight: 52, borderWidth: 1, borderColor: '#cbd5e1', borderRadius: 7, paddingHorizontal: 12, backgroundColor: '#fff', fontSize: 15 },
+  confirmCard: { backgroundColor: '#f8fafc', borderRadius: 8, padding: 12 },
+  infoRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', paddingVertical: 8, borderTopWidth: 1, borderTopColor: '#e5edf3', gap: 12 },
+  infoLabel: { color: '#64748b', fontSize: 12, fontWeight: '900' },
+  infoValue: { flex: 1, textAlign: 'right', color: '#111827', fontWeight: '800' },
+  createButton: { minHeight: 54, borderRadius: 8, backgroundColor: '#0f766e', alignItems: 'center', justifyContent: 'center', marginBottom: 20 },
+  createButtonDisabled: { backgroundColor: '#99c9c2', opacity: 0.8 },
+  createButtonText: { color: '#fff', fontWeight: '900', fontSize: 16 },
+  modalBackdrop: { flex: 1, backgroundColor: 'rgba(15, 23, 42, 0.42)', justifyContent: 'center', padding: 18 },
+  modalCard: { width: '100%', maxWidth: 560, alignSelf: 'center', maxHeight: '82%', backgroundColor: '#fff', borderRadius: 10, padding: 16, borderWidth: 1, borderColor: '#dbe4ea' },
+  modalHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 14 },
+  modalTitle: { fontSize: 18, fontWeight: '900', color: '#111827' },
+  modalCloseButton: { paddingVertical: 8, paddingHorizontal: 12, borderRadius: 7, backgroundColor: '#f1f5f9' },
+  modalCloseText: { color: '#334155', fontWeight: '800' },
+  modalSearchInput: { minHeight: 54, borderWidth: 1, borderColor: '#cbd5e1', borderRadius: 8, paddingHorizontal: 12, backgroundColor: '#fff', fontSize: 15, marginBottom: 12 },
+  modalOptions: { maxHeight: 360 },
 });

@@ -6,7 +6,8 @@
     "orientation": "portrait",
     "plugins": [
       "expo-router",
-      "expo-sharing"
+      "expo-sharing",
+      "@react-native-community/datetimepicker"
     ],
     "web": {
       "bundler": "metro"
