@@ -124,7 +124,7 @@ export default function FinalizarReportePage() {
     return code ? `${code} · ${name}` : name;
   }, [reportSnapshot]);
 
-  const canFinalize = Boolean(endTime.trim()) && Boolean(auditorSignature) && Boolean(responsibleSignature) && shouldSend !== null && rawAnswers.length > 0;
+  const canFinalize = Boolean(endTime.trim()) && Boolean(auditorSignature) && shouldSend !== null && rawAnswers.length > 0;
 
   const handleEndTimeChange = (_event: DateTimePickerEvent, date?: Date) => {
     if (Platform.OS !== 'ios') setShowEndTimePicker(false);
@@ -145,8 +145,8 @@ export default function FinalizarReportePage() {
   };
 
   const handleFinalizarReporte = async () => {
-    if (!canFinalize || !auditorSignature || !responsibleSignature || !auditorSignatureType || !responsibleSignatureType) {
-      alert('Completa hora de culminacion, ambas firmas y la opcion Enviar.');
+    if (!canFinalize || !auditorSignature || !auditorSignatureType) {
+      alert('Completa hora de culminacion, firma del auditor y la opcion Enviar.');
       return;
     }
 
@@ -159,7 +159,7 @@ export default function FinalizarReportePage() {
       const pathAuditor = `${storageBasePath}/firma_auditor.png`;
       const pathResponsable = `${storageBasePath}/firma_responsable.png`;
       const urlAuditor = await uploadSignature(auditorSignature, pathAuditor);
-      const urlResponsable = await uploadSignature(responsibleSignature, pathResponsable);
+      const urlResponsable = responsibleSignature ? await uploadSignature(responsibleSignature, pathResponsable) : null;
 
       const finalScorePercentage = maxScore > 0 ? roundToTwo((weightedScore / maxScore) * 100) : 0;
       const finalGradeBaseTen = maxScore > 0 ? roundToTwo((weightedScore / maxScore) * 10) : 0;
@@ -184,9 +184,9 @@ export default function FinalizarReportePage() {
           auditor_signature_url: urlAuditor,
           responsible_signature_url: urlResponsable,
           auditor_signature_type: auditorSignatureType,
-          responsible_signature_type: responsibleSignatureType,
+          responsible_signature_type: responsibleSignature ? responsibleSignatureType : null,
           auditor_signature_color: auditorColor,
-          responsible_signature_color: responsibleColor,
+          responsible_signature_color: responsibleSignature ? responsibleColor : null,
           should_send: shouldSend,
           end_time: endTime,
           final_percentage: finalScorePercentage,
@@ -268,6 +268,7 @@ export default function FinalizarReportePage() {
           }}
         />
         <Text style={styles.signatureName}>{responsibleDisplay}</Text>
+        {!responsibleSignature && <Text style={styles.noSignatureText}>Sin firma del responsable</Text>}
       </View>
 
       <View style={styles.card}>
@@ -375,6 +376,7 @@ const styles = StyleSheet.create({
   colorSwatch: { width: 14, height: 14, borderRadius: 7 },
   colorText: { color: '#334155', fontWeight: '800', fontSize: 12 },
   signatureName: { color: '#111827', fontWeight: '900', marginTop: 2 },
+  noSignatureText: { color: '#64748b', fontWeight: '800', marginTop: 4 },
   sendGroup: { flexDirection: 'row', gap: 10 },
   sendButton: { flex: 1, minHeight: 46, borderWidth: 1, borderColor: '#cbd5e1', borderRadius: 8, alignItems: 'center', justifyContent: 'center', backgroundColor: '#f8fafc' },
   sendButtonActive: { borderColor: '#0f766e', backgroundColor: '#0f766e' },

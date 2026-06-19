@@ -87,6 +87,10 @@ export default function SignaturePad({ title, penColor, previewUri, onOK, onClea
     if (!isDrawingRef.current) return;
     event.preventDefault();
     isDrawingRef.current = false;
+    const canvas = canvasRef.current;
+    if (canvas) {
+      onOK(canvas.toDataURL('image/png'), 'drawn');
+    }
   };
 
   const handleClear = () => {
@@ -103,21 +107,6 @@ export default function SignaturePad({ title, penColor, previewUri, onOK, onClea
 
     ref.current?.clearSignature();
     onClear();
-  };
-
-  const handleConfirm = () => {
-    if (Platform.OS === 'web') {
-      const canvas = canvasRef.current;
-      if (!canvas || !hasWebSignature) {
-        onClear();
-        return;
-      }
-
-      onOK(canvas.toDataURL('image/png'), 'drawn');
-      return;
-    }
-
-    ref.current?.readSignature();
   };
 
   const handleUploadSignature = async () => {
@@ -165,6 +154,7 @@ export default function SignaturePad({ title, penColor, previewUri, onOK, onClea
           <SignatureScreen
             ref={ref}
             onOK={(signature) => onOK(signature, 'drawn')}
+            onEnd={() => ref.current?.readSignature()}
             webStyle={style}
             autoClear={false}
             descriptionText=""
@@ -181,10 +171,6 @@ export default function SignaturePad({ title, penColor, previewUri, onOK, onClea
         <TouchableOpacity style={styles.secondaryButton} onPress={handleUploadSignature}>
           <Text style={styles.secondaryButtonText}>Subir imagen</Text>
         </TouchableOpacity>
-
-        <TouchableOpacity style={styles.confirmButton} onPress={handleConfirm}>
-          <Text style={styles.confirmButtonText}>Confirmar</Text>
-        </TouchableOpacity>
       </View>
     </View>
   );
@@ -200,6 +186,4 @@ const styles = StyleSheet.create({
   clearButtonText: { color: '#4b5563', fontSize: 13, fontWeight: '700' },
   secondaryButton: { flex: 1, padding: 10, borderWidth: 1, borderColor: '#0f766e', borderRadius: 6, alignItems: 'center', backgroundColor: '#f0fdfa' },
   secondaryButtonText: { color: '#0f766e', fontSize: 13, fontWeight: '800' },
-  confirmButton: { flex: 1, padding: 10, backgroundColor: '#0f766e', borderRadius: 6, alignItems: 'center' },
-  confirmButtonText: { color: '#fff', fontSize: 13, fontWeight: '800' },
 });
