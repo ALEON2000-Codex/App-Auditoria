@@ -1,32 +1,104 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, Image, ActivityIndicator } from 'react-native';
+import { ActivityIndicator, Image, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import NetInfo from '@react-native-community/netinfo';
 import { supabase } from '../../../../src/supabaseClient';
 import { offlineStorage } from '../../../../src/offlineStorage';
 
+type AnswerValue = 'cumple' | 'no_cumple' | null;
+type QuestionType = 'compliance' | 'cash_count' | 'pending_deposit' | 'inventory' | 'cup_count' | 'raw_material_count' | 'follow_up' | 'additional_novelty';
+
+interface CountItem {
+  label: string;
+  theoreticalValue: string;
+  physicalValue: string;
+}
+
 interface Question {
   id: string;
   question_text: string;
-  category?: string;
   region: string;
   visit_type_id: string;
   is_active: boolean;
-  evidence_required: boolean;
+  score_points: number;
+  question_type?: QuestionType | null;
+  is_scored?: boolean | null;
+  requires_observation_on_fail?: boolean | null;
+  min_evidence?: number | null;
+  max_evidence?: number | null;
+  numeric_mode?: string | null;
+  item_schema?: { label?: string; name?: string }[] | null;
 }
 
 interface AnswerState {
-  value: 'cumple' | 'no_cumple' | null;
+  value: AnswerValue;
   observation: string;
-  evidenceUrl: string;
-  localImageUri?: string; // Ruta temporal en el teléfono si no hay internet
+  evidenceUrls: string[];
+  localImageUris: string[];
   uploading: boolean;
+  theoreticalValue: string;
+  physicalValue: string;
+  currentShift: string;
+  previousShift: string;
+  countItems: CountItem[];
+}
+
+const emptyAnswer: AnswerState = {
+  value: null,
+  observation: '',
+  evidenceUrls: [],
+  localImageUris: [],
+  uploading: false,
+  theoreticalValue: '',
+  physicalValue: '',
+  currentShift: '',
+  previousShift: '',
+  countItems: [],
+};
+
+function getQuestionType(question: Question): QuestionType {
+  return question.question_type || 'compliance';
+}
+
+function getMaxEvidence(question: Question) {
+  if (getQuestionType(question) === 'additional_novelty') return 4;
+  return question.max_evidence || 2;
+}
+
+function toNumber(value: string) {
+  if (!value.trim()) return null;
+  const parsed = Number(value.replace(',', '.'));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function hasNoveltyContent(answer: AnswerState) {
+  return Boolean(answer.observation.trim()) || answer.evidenceUrls.length > 0 || answer.localImageUris.length > 0;
+}
+
+function isMultiItemCount(type: QuestionType) {
+  return type === 'inventory' || type === 'cup_count' || type === 'raw_material_count';
+}
+
+function buildInitialCountItems(question: Question) {
+  const schema = Array.isArray(question.item_schema) ? question.item_schema : [];
+  const items = schema
+    .map((item) => item.label || item.name || '')
+    .filter(Boolean)
+    .map((label) => ({ label, theoreticalValue: '', physicalValue: '' }));
+
+  return items.length > 0 ? items : [{ label: '', theoreticalValue: '', physicalValue: '' }];
+}
+
+function countItemDifference(item: CountItem) {
+  const theoretical = toNumber(item.theoreticalValue);
+  const physical = toNumber(item.physicalValue);
+  return theoretical !== null && physical !== null ? physical - theoretical : null;
 }
 
 export default function ChecklistDinamicoPage() {
   const router = useRouter();
-  const { id: reportId, region, visit_type_id, local_id } = useLocalSearchParams(); 
+  const { id: reportId, region, visit_type_id, local_id } = useLocalSearchParams();
 
   const [questions, setQuestions] = useState<Question[]>([]);
   const [answers, setAnswers] = useState<Record<string, AnswerState>>({});
@@ -35,26 +107,23 @@ export default function ChecklistDinamicoPage() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isOnline, setIsOnline] = useState<boolean | null>(true);
 
-  // 1. Escuchar el estado del internet en tiempo real
   useEffect(() => {
-    const unsubscribe = NetInfo.addEventListener(state => {
+    const unsubscribe = NetInfo.addEventListener((state) => {
       setIsOnline(state.isConnected);
     });
     return () => unsubscribe();
   }, []);
 
-  // 2. Cargar preguntas y verificar si había un borrador guardado en AsyncStorage
   useEffect(() => {
     async function loadData() {
       if (!region || !visit_type_id) {
-        setError('Faltan parámetros obligatorios.');
+        setError('Faltan parametros obligatorios.');
         setLoading(false);
         return;
       }
 
       setLoading(true);
 
-      // Tratar de jalar preguntas locales o remotas
       const { data, error: supabaseError } = await supabase
         .from('checklist_questions')
         .select('*')
@@ -68,32 +137,53 @@ export default function ChecklistDinamicoPage() {
         return;
       }
 
-      setQuestions(data || []);
+      const loadedQuestions = data || [];
+      setQuestions(loadedQuestions);
 
-      // Revisar si existe un borrador offline guardado previamente en el teléfono
       const savedDraft = await offlineStorage.getDraft(String(reportId));
 
       if (savedDraft) {
         setAnswers(savedDraft);
       } else {
-        // Si no hay borrador, inicializamos el estado en limpio
         const initialAnswers: Record<string, AnswerState> = {};
-        data?.forEach((q: Question) => {
-          initialAnswers[q.id] = { value: null, observation: '', evidenceUrl: '', uploading: false };
+        loadedQuestions.forEach((q: Question) => {
+          const type = getQuestionType(q);
+          initialAnswers[q.id] = {
+            ...emptyAnswer,
+            countItems: isMultiItemCount(type) ? buildInitialCountItems(q) : [],
+          };
         });
         setAnswers(initialAnswers);
       }
+
       setLoading(false);
     }
 
     loadData();
   }, [region, visit_type_id, reportId]);
 
-  // 3. Capturar imagen con soporte Offline
-  const handlePickImage = async (questionId: string) => {
+  const updateField = async (questionId: string, fieldsToUpdate: Partial<AnswerState>) => {
+    const updatedAnswers = {
+      ...answers,
+      [questionId]: { ...emptyAnswer, ...answers[questionId], ...fieldsToUpdate },
+    };
+    setAnswers(updatedAnswers);
+    await offlineStorage.saveDraft(String(reportId), updatedAnswers);
+  };
+
+  const handlePickImage = async (question: Question) => {
+    const questionId = question.id;
+    const currentAnswer = { ...emptyAnswer, ...answers[questionId] };
+    const maxEvidence = getMaxEvidence(question);
+
+    if (currentAnswer.evidenceUrls.length + currentAnswer.localImageUris.length >= maxEvidence) {
+      alert(`Esta pregunta permite hasta ${maxEvidence} imagenes.`);
+      return;
+    }
+
     const permissionResult = await ImagePicker.requestCameraPermissionsAsync();
     if (!permissionResult.granted) {
-      alert('Se requieren permisos de cámara.');
+      alert('Se requieren permisos de camara.');
       return;
     }
 
@@ -108,22 +198,18 @@ export default function ChecklistDinamicoPage() {
     const imageUri = result.assets[0].uri;
 
     if (!isOnline) {
-      // SI NO HAY INTERNET: Guardamos la ruta interna de la foto y la metemos al borrador
-      const updatedAnswers = {
-        ...answers,
-        [questionId]: { ...answers[questionId], localImageUri: imageUri, evidenceUrl: '', uploading: false }
-      };
-      setAnswers(updatedAnswers);
-      await offlineStorage.saveDraft(String(reportId), updatedAnswers);
-      alert('Foto guardada localmente en el borrador (Sin internet).');
+      const nextLocalImages = [...currentAnswer.localImageUris, imageUri].slice(0, maxEvidence);
+      await updateField(questionId, { localImageUris: nextLocalImages, uploading: false });
+      alert('Foto guardada localmente en el borrador.');
       return;
     }
 
-    // SI SÍ HAY INTERNET: La subimos directo a Supabase Storage
-    setAnswers(prev => ({ ...prev, [questionId]: { ...prev[questionId], uploading: true } }));
+    await updateField(questionId, { uploading: true });
+
     try {
-      const folderRegion = String(region).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-      const fileRoute = `${folderRegion}/2026-06-01/${local_id || 'sin-local'}/${reportId}/${questionId}/foto.jpg`;
+      const folderRegion = String(region).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+      const imageIndex = currentAnswer.evidenceUrls.length + currentAnswer.localImageUris.length + 1;
+      const fileRoute = `${folderRegion}/2026-06-01/${local_id || 'sin-local'}/${reportId}/${questionId}/foto-${imageIndex}.jpg`;
 
       const response = await fetch(imageUri);
       const blob = await response.blob();
@@ -135,60 +221,92 @@ export default function ChecklistDinamicoPage() {
       if (uploadError) throw uploadError;
 
       const { data: { publicUrl } } = supabase.storage.from('evidencias').getPublicUrl(fileRoute);
-
-      const updatedAnswers = {
-        ...answers,
-        [questionId]: { ...answers[questionId], evidenceUrl: publicUrl, localImageUri: imageUri, uploading: false }
-      };
-      setAnswers(updatedAnswers);
-      await offlineStorage.saveDraft(String(reportId), updatedAnswers);
+      const latestAnswer = { ...emptyAnswer, ...answers[questionId] };
+      await updateField(questionId, {
+        evidenceUrls: [...latestAnswer.evidenceUrls, publicUrl].slice(0, maxEvidence),
+        uploading: false,
+      });
     } catch (err: any) {
       alert('Error de subida: ' + err.message);
-      setAnswers(prev => ({ ...prev, [questionId]: { ...prev[questionId], uploading: false } }));
+      await updateField(questionId, { uploading: false });
     }
   };
 
-  // 4. Guardar cambios de texto u opciones en tiempo real en AsyncStorage
-  const updateField = async (questionId: string, fieldsToUpdate: Partial<AnswerState>) => {
-    const updatedAnswers = {
-      ...answers,
-      [questionId]: { ...answers[questionId], ...fieldsToUpdate }
-    };
-    setAnswers(updatedAnswers);
-    // Auto-guardado de respaldo permanente ante cierres inesperados de la app
-    await offlineStorage.saveDraft(String(reportId), updatedAnswers);
+  const getValidationMessage = (question: Question, answer: AnswerState) => {
+    const type = getQuestionType(question);
+    const observationRequired = answer.value === 'no_cumple' && question.requires_observation_on_fail !== false;
+
+    if (type === 'additional_novelty') return null;
+    if (!answer.value) return 'Selecciona CUMPLE o NO CUMPLE.';
+    if (observationRequired && !answer.observation.trim()) return 'Agrega una observacion para NO CUMPLE.';
+
+    if (type === 'cash_count' && (!answer.theoreticalValue.trim() || !answer.physicalValue.trim())) {
+      return 'Completa valor teorico y valor fisico.';
+    }
+
+    if (isMultiItemCount(type)) {
+      const usedItems = answer.countItems.filter((item) => item.label.trim() || item.theoreticalValue.trim() || item.physicalValue.trim());
+      if (usedItems.length === 0) return 'Registra al menos un item con stock teorico y fisico.';
+      const incompleteItem = usedItems.find((item) => !item.label.trim() || !item.theoreticalValue.trim() || !item.physicalValue.trim());
+      if (incompleteItem) return 'Completa nombre, stock teorico y stock fisico en cada item registrado.';
+    }
+
+    if (type === 'pending_deposit' && (!answer.currentShift.trim() || !answer.previousShift.trim())) {
+      return 'Completa turno actual y turno anterior.';
+    }
+
+    return null;
   };
 
-  // 5. Validación obligatoria estricta
-  const checkFormValidation = (): boolean => {
+  const checkFormValidation = () => {
     if (questions.length === 0) return false;
-    for (const q of questions) {
-      const answer = answers[q.id];
-      if (!answer || answer.value === null || answer.observation.trim().length < 3) return false;
-      if (q.evidence_required && !answer.evidenceUrl && !answer.localImageUri) return false;
-    }
-    return true;
+    return questions.every((q) => !getValidationMessage(q, { ...emptyAnswer, ...answers[q.id] }));
   };
 
-  // 6. Acción final del Botón
   const handleSubmit = async () => {
     if (!checkFormValidation()) return;
     setIsSubmitting(true);
 
     if (!isOnline) {
-      alert('¡Auditoría guardada localmente como BORRADOR! Se sincronizará al recuperar red.');
+      alert('Auditoria guardada localmente como borrador. Se sincronizara al recuperar red.');
       router.replace('/nueva-auditoria');
       setIsSubmitting(false);
       return;
     }
 
-    const payload = questions.map((q) => ({
-      report_id: reportId,
-      question_id: q.id,
-      value: answers[q.id].value,
-      observation: answers[q.id].observation.trim(),
-      evidence_url: answers[q.id].evidenceUrl || null,
-    }));
+    const payload = questions.flatMap((q) => {
+      const answer = { ...emptyAnswer, ...answers[q.id] };
+      const type = getQuestionType(q);
+
+      if (type === 'additional_novelty' && !hasNoveltyContent(answer)) {
+        return [];
+      }
+
+      const numericItems = isMultiItemCount(type)
+        ? answer.countItems
+            .filter((item) => item.label.trim() || item.theoreticalValue.trim() || item.physicalValue.trim())
+            .map((item) => ({
+              label: item.label.trim(),
+              theoretical: toNumber(item.theoreticalValue),
+              physical: toNumber(item.physicalValue),
+              difference: countItemDifference(item),
+            }))
+        : [];
+      const firstNumericItem = numericItems[0];
+
+      return [{
+        report_id: reportId,
+        question_id: q.id,
+        value: type === 'additional_novelty' ? 'cumple' : answer.value,
+        observation: answer.observation.trim(),
+        evidence_url: answer.evidenceUrls[0] || null,
+        numeric_value_theoretical: firstNumericItem?.theoretical ?? toNumber(answer.theoreticalValue),
+        numeric_value_physical: firstNumericItem?.physical ?? toNumber(answer.physicalValue),
+        numeric_value_current: toNumber(answer.currentShift),
+        numeric_value_previous: toNumber(answer.previousShift),
+        numeric_items: numericItems,
+      }];
+    });
 
     const { error: deleteError } = await supabase
       .from('audit_answers_draft')
@@ -201,14 +319,16 @@ export default function ChecklistDinamicoPage() {
       return;
     }
 
-    const { error: insertError } = await supabase
-      .from('audit_answers_draft')
-      .insert(payload);
+    if (payload.length > 0) {
+      const { error: insertError } = await supabase
+        .from('audit_answers_draft')
+        .insert(payload);
 
-    if (insertError) {
-      alert('No se pudo guardar el checklist en Supabase: ' + insertError.message);
-      setIsSubmitting(false);
-      return;
+      if (insertError) {
+        alert('No se pudo guardar el checklist en Supabase: ' + insertError.message);
+        setIsSubmitting(false);
+        return;
+      }
     }
 
     await offlineStorage.clearDraft(String(reportId));
@@ -219,128 +339,237 @@ export default function ChecklistDinamicoPage() {
     setIsSubmitting(false);
   };
 
-  const isFormValid = checkFormValidation();
+  const isFormValid = useMemo(checkFormValidation, [questions, answers]);
 
-  if (loading) return <View style={styles.center}><ActivityIndicator size="large" /><Text>Cargando datos...</Text></View>;
-  if (error) return <View style={styles.center}><Text style={{ color: 'red' }}>Error: {error}</Text></View>;
-return (
-    <ScrollView contentContainerStyle={styles.container}>
-      {/* Indicador visual del estado de la conexión en tiempo real */}
+  if (loading) {
+    return <View style={styles.center}><ActivityIndicator size="large" /><Text>Cargando datos...</Text></View>;
+  }
+
+  if (error) {
+    return <View style={styles.center}><Text style={styles.errorText}>Error: {error}</Text></View>;
+  }
+
+  return (
+    <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
       <View style={[styles.networkBanner, isOnline ? styles.bannerOnline : styles.bannerOffline]}>
         <Text style={styles.bannerText}>
-          {isOnline ? '🌐 Conectado a Internet (Modo Online)' : '⚠️ Sin Conexión (Modo Borrador Offline)'}
+          {isOnline ? 'Conectado a Internet' : 'Sin conexion: modo borrador offline'}
         </Text>
       </View>
 
       <Text style={styles.title}>Formulario de Checklist</Text>
-      <Text style={styles.subtitle}>ID Auditoría: {reportId} | Ubicación: {region}</Text>
+      <Text style={styles.subtitle}>ID Auditoria: {reportId} | Region: {region}</Text>
 
       {questions.map((q, index) => {
-        const currentAnswer = answers[q.id] || { value: null, observation: '', evidenceUrl: '', uploading: false };
-        
+        const currentAnswer = { ...emptyAnswer, ...answers[q.id] };
+        const type = getQuestionType(q);
+        const maxEvidence = getMaxEvidence(q);
+        const evidenceCount = currentAnswer.evidenceUrls.length + currentAnswer.localImageUris.length;
+        const difference = toNumber(currentAnswer.physicalValue) !== null && toNumber(currentAnswer.theoreticalValue) !== null
+          ? Number(toNumber(currentAnswer.physicalValue)) - Number(toNumber(currentAnswer.theoreticalValue))
+          : null;
+        const validationMessage = getValidationMessage(q, currentAnswer);
+
         return (
           <View key={q.id} style={styles.card}>
             <Text style={styles.questionText}>{index + 1}. {q.question_text}</Text>
-            
-            {/* 1. Selector de respuesta: Cumple / No Cumple */}
-            <View style={styles.radioGroup}>
-              <TouchableOpacity 
-                style={[styles.radioButton, currentAnswer.value === 'cumple' && styles.radioActiveCumple]}
-                onPress={() => updateField(q.id, { value: 'cumple' })}
-              >
-                <Text style={[styles.radioText, currentAnswer.value === 'cumple' && styles.textWhite]}>Cumple</Text>
-              </TouchableOpacity>
 
-              <TouchableOpacity 
-                style={[styles.radioButton, currentAnswer.value === 'no_cumple' && styles.radioActiveNoCumple]}
-                onPress={() => updateField(q.id, { value: 'no_cumple' })}
-              >
-                <Text style={[styles.radioText, currentAnswer.value === 'no_cumple' && styles.textWhite]}>No Cumple</Text>
-              </TouchableOpacity>
-            </View>
+            {type !== 'additional_novelty' && (
+              <View style={styles.radioGroup}>
+                <TouchableOpacity
+                  style={[styles.radioButton, currentAnswer.value === 'cumple' && styles.radioActiveCumple]}
+                  onPress={() => updateField(q.id, { value: 'cumple' })}
+                >
+                  <Text style={[styles.radioText, currentAnswer.value === 'cumple' && styles.textWhite]}>CUMPLE</Text>
+                </TouchableOpacity>
 
-            {/* 2. Campo de Observación Obligatoria */}
-            <Text style={styles.fieldLabel}>Observación Obligatoria *</Text>
+                <TouchableOpacity
+                  style={[styles.radioButton, currentAnswer.value === 'no_cumple' && styles.radioActiveNoCumple]}
+                  onPress={() => updateField(q.id, { value: 'no_cumple' })}
+                >
+                  <Text style={[styles.radioText, currentAnswer.value === 'no_cumple' && styles.textWhite]}>NO CUMPLE</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+
+            <Text style={styles.fieldLabel}>
+              {type === 'additional_novelty' ? 'Novedad adicional opcional' : 'Observaciones encontradas'}
+            </Text>
             <TextInput
               style={styles.textArea}
               multiline
               numberOfLines={3}
-              placeholder="Describa detalladamente los hallazgos encontrados..."
+              placeholder={currentAnswer.value === 'no_cumple' ? 'Describe el hallazgo detectado...' : 'Observacion opcional...'}
               value={currentAnswer.observation}
               onChangeText={(text) => updateField(q.id, { observation: text })}
             />
 
-            {/* 3. Captura de Evidencias con soporte local/remoto */}
-            <Text style={styles.fieldLabel}>
-              Evidencia Fotográfica {q.evidence_required ? '(Obligatoria *)' : '(Opcional)'}
-            </Text>
-            
-            {currentAnswer.uploading ? (
-              <View style={styles.imagePlaceholder}>
-                <ActivityIndicator size="small" color="#0070f3" />
-                <Text style={styles.uploadText}>Subiendo foto a Supabase...</Text>
-              </View>
-            ) : (currentAnswer.evidenceUrl || currentAnswer.localImageUri) ? (
-              <View style={styles.imagePreviewContainer}>
-                <Image 
-                  source={{ uri: currentAnswer.evidenceUrl || currentAnswer.localImageUri }} 
-                  style={styles.imagePreview} 
+            {type === 'cash_count' && (
+              <View style={styles.numericGrid}>
+                <NumberField
+                  label="Valor teorico"
+                  value={currentAnswer.theoreticalValue}
+                  onChangeText={(text) => updateField(q.id, { theoreticalValue: text })}
                 />
-                <Text style={isOnline ? styles.successUploadText : styles.offlineUploadText}>
-                  {isOnline ? '✓ Guardada en Supabase Storage' : '💾 Guardada localmente (Pendiente de subida)'}
-                </Text>
+                <NumberField
+                  label="Valor fisico contado"
+                  value={currentAnswer.physicalValue}
+                  onChangeText={(text) => updateField(q.id, { physicalValue: text })}
+                />
+                <Text style={styles.differenceText}>Diferencia: {difference === null ? 'Pendiente' : difference.toFixed(2)}</Text>
               </View>
-            ) : (
-              <TouchableOpacity style={styles.photoButton} onPress={() => handlePickImage(q.id)}>
-                <Text style={styles.photoButtonText}>📸 Capturar Evidencia</Text>
-              </TouchableOpacity>
             )}
+
+            {isMultiItemCount(type) && (
+              <CountItemsEditor
+                title={type === 'cup_count' ? 'Conteo de vasos' : type === 'raw_material_count' ? 'Conteo de materias primas' : 'Conteo de inventario'}
+                items={currentAnswer.countItems.length > 0 ? currentAnswer.countItems : buildInitialCountItems(q)}
+                onChange={(items) => updateField(q.id, { countItems: items })}
+              />
+            )}
+
+            {type === 'pending_deposit' && (
+              <View style={styles.numericGrid}>
+                <NumberField label="Turno actual" value={currentAnswer.currentShift} onChangeText={(text) => updateField(q.id, { currentShift: text })} />
+                <NumberField label="Turno anterior" value={currentAnswer.previousShift} onChangeText={(text) => updateField(q.id, { previousShift: text })} />
+              </View>
+            )}
+
+            <View style={styles.evidenceHeader}>
+              <Text style={styles.fieldLabel}>Evidencias opcionales</Text>
+              <Text style={styles.evidenceCounter}>{evidenceCount}/{maxEvidence}</Text>
+            </View>
+
+            <View style={styles.imageGrid}>
+              {[...currentAnswer.localImageUris, ...currentAnswer.evidenceUrls].slice(0, maxEvidence).map((uri, imageIndex) => (
+                <Image key={`${q.id}-${imageIndex}-${uri}`} source={{ uri }} style={styles.imagePreview} />
+              ))}
+              {evidenceCount < maxEvidence && (
+                <TouchableOpacity style={styles.photoButton} onPress={() => handlePickImage(q)} disabled={currentAnswer.uploading}>
+                  {currentAnswer.uploading ? <ActivityIndicator size="small" color="#0f766e" /> : <Text style={styles.photoButtonText}>+ Imagen</Text>}
+                </TouchableOpacity>
+              )}
+            </View>
+
+            {validationMessage && <Text style={styles.validationText}>{validationMessage}</Text>}
           </View>
         );
       })}
 
-      {/* Botón de Guardado Dinámico */}
-      <TouchableOpacity 
-        style={[styles.submitButton, !isFormValid && styles.disabledButton]} 
+      <TouchableOpacity
+        style={[styles.submitButton, (!isFormValid || isSubmitting) && styles.disabledButton]}
         onPress={handleSubmit}
         disabled={!isFormValid || isSubmitting}
       >
         <Text style={styles.submitButtonText}>
-          {isSubmitting ? 'Procesando...' : isOnline ? 'Finalizar y Guardar Auditoría 💾' : 'Guardar Borrador Local 📦'}
+          {isSubmitting ? 'Procesando...' : isOnline ? 'Guardar y pasar a conclusiones' : 'Guardar borrador local'}
         </Text>
       </TouchableOpacity>
     </ScrollView>
   );
 }
 
+function NumberField({ label, value, onChangeText }: { label: string; value: string; onChangeText: (text: string) => void }) {
+  return (
+    <View style={styles.numberField}>
+      <Text style={styles.fieldLabel}>{label}</Text>
+      <TextInput
+        style={styles.input}
+        keyboardType="decimal-pad"
+        value={value}
+        onChangeText={onChangeText}
+        placeholder="0.00"
+      />
+    </View>
+  );
+}
+
+function CountItemsEditor({
+  title,
+  items,
+  onChange,
+}: {
+  title: string;
+  items: CountItem[];
+  onChange: (items: CountItem[]) => void;
+}) {
+  const updateItem = (index: number, fields: Partial<CountItem>) => {
+    onChange(items.map((item, itemIndex) => (itemIndex === index ? { ...item, ...fields } : item)));
+  };
+
+  const addItem = () => {
+    onChange([...items, { label: '', theoreticalValue: '', physicalValue: '' }]);
+  };
+
+  return (
+    <View style={styles.countBox}>
+      <Text style={styles.countTitle}>{title}</Text>
+      {items.map((item, index) => {
+        const difference = countItemDifference(item);
+
+        return (
+          <View key={`${index}-${item.label}`} style={styles.countRow}>
+            <TextInput
+              style={[styles.input, styles.itemNameInput]}
+              value={item.label}
+              onChangeText={(text) => updateItem(index, { label: text })}
+              placeholder="Item"
+            />
+            <View style={styles.countNumbers}>
+              <NumberField label="Teorico" value={item.theoreticalValue} onChangeText={(text) => updateItem(index, { theoreticalValue: text })} />
+              <NumberField label="Fisico" value={item.physicalValue} onChangeText={(text) => updateItem(index, { physicalValue: text })} />
+            </View>
+            <Text style={styles.itemDifference}>Diferencia: {difference === null ? 'Pendiente' : difference.toFixed(2)}</Text>
+          </View>
+        );
+      })}
+      <TouchableOpacity style={styles.addItemButton} onPress={addItem}>
+        <Text style={styles.addItemText}>+ Agregar item</Text>
+      </TouchableOpacity>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
-  container: { padding: 20, maxWidth: 600, alignSelf: 'center', width: '100%', backgroundColor: '#fdfdfd' },
+  container: { padding: 18, maxWidth: 720, alignSelf: 'center', width: '100%', backgroundColor: '#f3f6f8' },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 40 },
-  networkBanner: { padding: 10, borderRadius: 6, marginBottom: 15, alignItems: 'center' },
+  errorText: { color: '#b91c1c', fontWeight: '800' },
+  networkBanner: { padding: 10, borderRadius: 8, marginBottom: 15, alignItems: 'center' },
   bannerOnline: { backgroundColor: '#d1fae5' },
   bannerOffline: { backgroundColor: '#fee2e2' },
-  bannerText: { fontSize: 13, fontWeight: 'bold', color: '#374151' },
-  title: { fontSize: 22, fontWeight: 'bold', borderBottomWidth: 2, borderBottomColor: '#333', paddingBottom: 10 },
-  subtitle: { fontSize: 13, color: '#666', marginTop: 5, marginBottom: 15 },
-  card: { borderWidth: 1, borderColor: '#e2e8f0', padding: 20, borderRadius: 8, backgroundColor: '#fff', marginTop: 15 },
-  questionText: { fontSize: 16, fontWeight: 'bold', color: '#1a202c', marginBottom: 15 },
-  radioGroup: { flexDirection: 'row', gap: 15, marginBottom: 15 },
-  radioButton: { flex: 1, paddingVertical: 10, borderWidth: 1, borderColor: '#cbd5e0', borderRadius: 6, alignItems: 'center', backgroundColor: '#f7fafc' },
-  radioActiveCumple: { backgroundColor: '#10b981', borderColor: '#10b981' },
-  radioActiveNoCumple: { backgroundColor: '#ef4444', borderColor: '#ef4444' },
-  radioText: { fontWeight: '600', color: '#4a5568' },
+  bannerText: { fontSize: 13, fontWeight: '800', color: '#374151' },
+  title: { fontSize: 22, fontWeight: '900', color: '#111827' },
+  subtitle: { fontSize: 13, color: '#64748b', marginTop: 5, marginBottom: 15 },
+  card: { borderWidth: 1, borderColor: '#dde5eb', padding: 16, borderRadius: 8, backgroundColor: '#fff', marginTop: 14 },
+  questionText: { fontSize: 16, fontWeight: '900', color: '#111827', marginBottom: 12, lineHeight: 22 },
+  radioGroup: { flexDirection: 'row', gap: 10, marginBottom: 14 },
+  radioButton: { flex: 1, minHeight: 46, borderWidth: 1, borderColor: '#cbd5e1', borderRadius: 8, alignItems: 'center', justifyContent: 'center', backgroundColor: '#f8fafc' },
+  radioActiveCumple: { backgroundColor: '#0f766e', borderColor: '#0f766e' },
+  radioActiveNoCumple: { backgroundColor: '#dc2626', borderColor: '#dc2626' },
+  radioText: { fontWeight: '900', color: '#334155' },
   textWhite: { color: '#fff' },
-  fieldLabel: { fontSize: 13, fontWeight: '600', color: '#4a5568', marginBottom: 5, marginTop: 10 },
-  textArea: { borderWidth: 1, borderColor: '#cbd5e0', borderRadius: 6, padding: 10, fontSize: 14, backgroundColor: '#fff', height: 60, textAlignVertical: 'top' },
-  photoButton: { borderWidth: 1, borderColor: '#0070f3', borderStyle: 'dashed', borderRadius: 6, padding: 12, alignItems: 'center', marginTop: 5, backgroundColor: '#f0f7ff' },
-  photoButtonText: { color: '#0070f3', fontWeight: 'bold' },
-  imagePlaceholder: { padding: 15, alignItems: 'center', justifyContent: 'center' },
-  uploadText: { fontSize: 12, color: '#666', marginTop: 5 },
-  imagePreviewContainer: { marginTop: 10, alignItems: 'center' },
-  imagePreview: { width: '100%', height: 180, borderRadius: 6, backgroundColor: '#eee' },
-  successUploadText: { fontSize: 12, color: '#10b981', fontWeight: 'bold', marginTop: 5 },
-  offlineUploadText: { fontSize: 12, color: '#f59e0b', fontWeight: 'bold', marginTop: 5 },
-  submitButton: { backgroundColor: '#0070f3', padding: 15, borderRadius: 6, alignItems: 'center', marginTop: 25, marginBottom: 40 },
-  disabledButton: { backgroundColor: '#bfdbfe', opacity: 0.7 },
-  submitButtonText: { color: '#fff', fontSize: 16, fontWeight: 'bold' }
+  fieldLabel: { fontSize: 12, fontWeight: '900', color: '#475569', marginBottom: 6, marginTop: 8 },
+  textArea: { borderWidth: 1, borderColor: '#cbd5e1', borderRadius: 8, padding: 10, fontSize: 14, backgroundColor: '#fff', minHeight: 76, textAlignVertical: 'top' },
+  numericGrid: { marginTop: 8, gap: 8 },
+  numberField: { flex: 1 },
+  input: { minHeight: 48, borderWidth: 1, borderColor: '#cbd5e1', borderRadius: 8, paddingHorizontal: 10, backgroundColor: '#fff', fontSize: 15 },
+  differenceText: { color: '#0f766e', fontWeight: '900', marginTop: 2 },
+  countBox: { marginTop: 10, borderWidth: 1, borderColor: '#e2e8f0', borderRadius: 8, padding: 10, backgroundColor: '#f8fafc' },
+  countTitle: { color: '#111827', fontWeight: '900', marginBottom: 8 },
+  countRow: { borderTopWidth: 1, borderTopColor: '#e2e8f0', paddingTop: 10, marginTop: 8 },
+  itemNameInput: { marginBottom: 4 },
+  countNumbers: { flexDirection: 'row', gap: 8 },
+  itemDifference: { color: '#0f766e', fontWeight: '900', marginTop: 6 },
+  addItemButton: { minHeight: 42, borderRadius: 8, borderWidth: 1, borderColor: '#0f766e', alignItems: 'center', justifyContent: 'center', marginTop: 10, backgroundColor: '#f0fdfa' },
+  addItemText: { color: '#0f766e', fontWeight: '900' },
+  evidenceHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 10 },
+  evidenceCounter: { color: '#64748b', fontWeight: '800', fontSize: 12 },
+  imageGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 4 },
+  photoButton: { width: 118, height: 92, borderWidth: 1, borderColor: '#0f766e', borderStyle: 'dashed', borderRadius: 8, alignItems: 'center', justifyContent: 'center', backgroundColor: '#f0fdfa' },
+  photoButtonText: { color: '#0f766e', fontWeight: '900' },
+  imagePreview: { width: 118, height: 92, borderRadius: 8, backgroundColor: '#e2e8f0' },
+  validationText: { marginTop: 10, color: '#b91c1c', fontWeight: '800', fontSize: 12 },
+  submitButton: { backgroundColor: '#0f766e', padding: 15, borderRadius: 8, alignItems: 'center', marginTop: 24, marginBottom: 40 },
+  disabledButton: { backgroundColor: '#99c9c2', opacity: 0.7 },
+  submitButtonText: { color: '#fff', fontSize: 16, fontWeight: '900' },
 });

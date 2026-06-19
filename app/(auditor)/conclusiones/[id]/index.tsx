@@ -1,17 +1,55 @@
-import { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator } from 'react-native';
+import { ActivityIndicator, Platform, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/datetimepicker';
 import { supabase } from '../../../../src/supabaseClient';
-import SignaturePad from '../../../../src/features/audits/components/signature-pad';
+import SignaturePad, { SignatureInputType } from '../../../../src/features/audits/components/signature-pad';
+
+type SendChoice = boolean | null;
 
 interface AnswerRecord {
   question_id: string;
   value: 'cumple' | 'no_cumple';
   observation: string;
-  evidence_url: string;
+  evidence_url: string | null;
   checklist_questions?: {
     score_points: number;
+    is_scored: boolean | null;
+    question_type: string | null;
   } | null;
+}
+
+interface ReportSnapshot {
+  auditor_name_snapshot: string | null;
+  responsible_code: string | null;
+  responsible_name_snapshot: string | null;
+}
+
+const signatureColors = [
+  { label: 'Negro', value: '#111827' },
+  { label: 'Azul', value: '#1d4ed8' },
+  { label: 'Rojo', value: '#dc2626' },
+  { label: 'Lila', value: '#7c3aed' },
+  { label: 'Verde', value: '#0f766e' },
+];
+
+function pad(value: number) {
+  return String(value).padStart(2, '0');
+}
+
+function dateToTime(date: Date) {
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function roundToTwo(value: number) {
+  return Math.round(value * 100) / 100;
+}
+
+function isScoredAnswer(answer: AnswerRecord) {
+  const question = answer.checklist_questions;
+  if (!question) return true;
+  if (question.is_scored === false) return false;
+  return !['follow_up', 'additional_novelty'].includes(question.question_type || '');
 }
 
 export default function FinalizarReportePage() {
@@ -19,186 +57,330 @@ export default function FinalizarReportePage() {
   const { id: reportId, region } = useLocalSearchParams();
 
   const [loading, setLoading] = useState(true);
-  const [totalQuestions, setTotalQuestions] = useState(0);
-  const [correctAnswers, setCorrectAnswers] = useState(0);
   const [rawAnswers, setRawAnswers] = useState<AnswerRecord[]>([]);
   const [weightedScore, setWeightedScore] = useState(0);
   const [maxScore, setMaxScore] = useState(0);
+  const [reportSnapshot, setReportSnapshot] = useState<ReportSnapshot | null>(null);
+  const [endTime, setEndTime] = useState(dateToTime(new Date()));
+  const [showEndTimePicker, setShowEndTimePicker] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
 
-  // Almacenamiento Base64 temporal de firmas antes de subida binaria
-  const [firmaAuditorBase64, setFirmaAuditorBase64] = useState<string | null>(null);
-  const [firmaResponsableBase64, setFirmaResponsableBase64] = useState<string | null>(null);
+  const [auditorSignature, setAuditorSignature] = useState<string | null>(null);
+  const [responsibleSignature, setResponsibleSignature] = useState<string | null>(null);
+  const [auditorSignatureType, setAuditorSignatureType] = useState<SignatureInputType | null>(null);
+  const [responsibleSignatureType, setResponsibleSignatureType] = useState<SignatureInputType | null>(null);
+  const [auditorColor, setAuditorColor] = useState(signatureColors[0].value);
+  const [responsibleColor, setResponsibleColor] = useState(signatureColors[0].value);
+  const [shouldSend, setShouldSend] = useState<SendChoice>(null);
 
-  // 1. Carga previa de las respuestas del checklist para cómputo de métricas
   useEffect(() => {
-    async function loadAnswersForEvaluation() {
+    async function loadClosingData() {
       setLoading(true);
-      const { data, error } = await supabase
-        .from('audit_answers_draft')
-        .select('*, checklist_questions(score_points)')
-        .eq('report_id', reportId);
 
-      if (data && data.length > 0) {
-        const answers = data as AnswerRecord[];
-        const obtained = answers.reduce((total, answer) => {
-          const points = Number(answer.checklist_questions?.score_points || 0);
-          return answer.value === 'cumple' ? total + points : total;
-        }, 0);
-        const possible = answers.reduce(
-          (total, answer) => total + Number(answer.checklist_questions?.score_points || 0),
-          0,
-        );
+      const [{ data: answersData, error: answersError }, { data: reportData, error: reportError }] = await Promise.all([
+        supabase
+          .from('audit_answers_draft')
+          .select('*, checklist_questions(score_points, is_scored, question_type)')
+          .eq('report_id', reportId),
+        supabase
+          .from('audit_reports')
+          .select('auditor_name_snapshot, responsible_code, responsible_name_snapshot')
+          .eq('id', reportId)
+          .single<ReportSnapshot>(),
+      ]);
 
-        setRawAnswers(answers);
-        setTotalQuestions(data.length);
-        const cumpleCount = answers.filter((a) => a.value === 'cumple').length;
-        setCorrectAnswers(cumpleCount);
-        setWeightedScore(roundToTwo(obtained));
-        setMaxScore(roundToTwo(possible));
+      if (answersError) {
+        alert('No se pudieron cargar las respuestas: ' + answersError.message);
       }
+
+      if (reportError) {
+        alert('No se pudo cargar el reporte: ' + reportError.message);
+      }
+
+      const answers = (answersData || []) as AnswerRecord[];
+      const scoredAnswers = answers.filter(isScoredAnswer);
+      const obtained = scoredAnswers.reduce((total, answer) => {
+        const points = Number(answer.checklist_questions?.score_points || 0);
+        return answer.value === 'cumple' ? total + points : total;
+      }, 0);
+      const possible = scoredAnswers.reduce(
+        (total, answer) => total + Number(answer.checklist_questions?.score_points || 0),
+        0,
+      );
+
+      setRawAnswers(answers);
+      setWeightedScore(roundToTwo(obtained));
+      setMaxScore(roundToTwo(possible));
+      setReportSnapshot(reportData || null);
       setLoading(false);
     }
-    if (reportId) loadAnswersForEvaluation();
+
+    if (reportId) loadClosingData();
   }, [reportId]);
 
-  const base64ToBlob = async (base64Data: string) => {
-    const response = await fetch(base64Data);
-    const blob = await response.blob();
-    return blob;
+  const responsibleDisplay = useMemo(() => {
+    const code = reportSnapshot?.responsible_code;
+    const name = reportSnapshot?.responsible_name_snapshot || 'Responsable';
+    return code ? `${code} · ${name}` : name;
+  }, [reportSnapshot]);
+
+  const canFinalize = Boolean(endTime.trim()) && Boolean(auditorSignature) && Boolean(responsibleSignature) && shouldSend !== null && rawAnswers.length > 0;
+
+  const handleEndTimeChange = (_event: DateTimePickerEvent, date?: Date) => {
+    if (Platform.OS !== 'ios') setShowEndTimePicker(false);
+    if (date) setEndTime(dateToTime(date));
   };
 
-  // 2. Ejecución integral del Paso 21
+  const base64ToBlob = async (signatureData: string) => {
+    const response = await fetch(signatureData);
+    return response.blob();
+  };
+
+  const uploadSignature = async (signatureData: string, path: string) => {
+    const blob = await base64ToBlob(signatureData);
+    const { error } = await supabase.storage.from('evidencias').upload(path, blob, { contentType: 'image/png', upsert: true });
+    if (error) throw error;
+    const { data: { publicUrl } } = supabase.storage.from('evidencias').getPublicUrl(path);
+    return publicUrl;
+  };
+
   const handleFinalizarReporte = async () => {
-    if (!firmaAuditorBase64 || !firmaResponsableBase64) {
-      alert('Error: Se requieren las firmas de ambas partes.');
+    if (!canFinalize || !auditorSignature || !responsibleSignature || !auditorSignatureType || !responsibleSignatureType) {
+      alert('Completa hora de culminacion, ambas firmas y la opcion Enviar.');
       return;
     }
 
     setIsSaving(true);
     try {
-      const folderRegion = String(region || 'general').toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-      const folderDate = "2026-06-01";
+      const folderRegion = String(region || 'general').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+      const folderDate = new Date().toISOString().slice(0, 10);
       const storageBasePath = `${folderRegion}/${folderDate}/${reportId}/firmas`;
 
-      // A. Procesar y transformar firmas a binario
-      const blobAuditor = await base64ToBlob(firmaAuditorBase64);
-      const blobResponsable = await base64ToBlob(firmaResponsableBase64);
-
-      // B. Almacenar Firma Auditor en Storage
       const pathAuditor = `${storageBasePath}/firma_auditor.png`;
-      const { error: errAuditor } = await supabase.storage.from('evidencias').upload(pathAuditor, blobAuditor, { contentType: 'image/png', upsert: true });
-      if (errAuditor) throw new Error(`Firma Auditor Storage: ${errAuditor.message}`);
-
-      // C. Almacenar Firma Responsable en Storage
       const pathResponsable = `${storageBasePath}/firma_responsable.png`;
-      const { error: errResponsable } = await supabase.storage.from('evidencias').upload(pathResponsable, blobResponsable, { contentType: 'image/png', upsert: true });
-      if (errResponsable) throw new Error(`Firma Responsable Storage: ${errResponsable.message}`);
+      const urlAuditor = await uploadSignature(auditorSignature, pathAuditor);
+      const urlResponsable = await uploadSignature(responsibleSignature, pathResponsable);
 
-      const { data: { publicUrl: urlAuditor } } = supabase.storage.from('evidencias').getPublicUrl(pathAuditor);
-      const { data: { publicUrl: urlResponsable } } = supabase.storage.from('evidencias').getPublicUrl(pathResponsable);
-
-      // D. CÁLCULO PONDERADO SOBRE 10 SEGÚN score_points
       const finalScorePercentage = maxScore > 0 ? roundToTwo((weightedScore / maxScore) * 100) : 0;
       const finalGradeBaseTen = maxScore > 0 ? roundToTwo((weightedScore / maxScore) * 10) : 0;
 
-      // E. Migrar respuestas temporales a historial definitivo consolidado
-      const answersPayload = rawAnswers.map((ra) => ({
+      const answersPayload = rawAnswers.map((answer) => ({
         report_id: reportId,
-        question_id: ra.question_id,
-        value: ra.value,
-        observation: ra.observation,
-        evidence_url: ra.evidence_url,
-        created_at: new Date().toISOString()
+        question_id: answer.question_id,
+        value: answer.value,
+        observation: answer.observation,
+        evidence_url: answer.evidence_url,
+        created_at: new Date().toISOString(),
       }));
 
       const { error: errInsertAnswers } = await supabase.from('audit_answers_final').insert(answersPayload);
       if (errInsertAnswers) throw errInsertAnswers;
 
-      // F. MARCAR REPORTE COMO FINALIZED Y ALMACENAR FIRMAS Y NOTAS
       const { error: errFinalizeReport } = await supabase
         .from('audit_reports')
         .update({
           signature_auditor_url: urlAuditor,
           signature_responsible_url: urlResponsable,
+          auditor_signature_url: urlAuditor,
+          responsible_signature_url: urlResponsable,
+          auditor_signature_type: auditorSignatureType,
+          responsible_signature_type: responsibleSignatureType,
+          auditor_signature_color: auditorColor,
+          responsible_signature_color: responsibleColor,
+          should_send: shouldSend,
+          end_time: endTime,
           final_percentage: finalScorePercentage,
           final_grade: finalGradeBaseTen,
-          status: 'finalized', // Marcado estricto solicitado
-          updated_at: new Date().toISOString()
+          status: 'finalized',
+          updated_at: new Date().toISOString(),
         })
         .eq('id', reportId);
 
       if (errFinalizeReport) throw errFinalizeReport;
-await supabase.functions.invoke('finalize-report', {
-  body: { reportId: reportId, region: region }
-});
 
-      // G. Limpieza de tabla borrador intermedia
+      if (shouldSend) {
+        const { error: sendError } = await supabase.functions.invoke('finalize-report', {
+          body: { reportId, region },
+        });
+        if (sendError) throw sendError;
+      }
+
       await supabase.from('audit_answers_draft').delete().eq('report_id', reportId);
 
-      alert(`Reporte consolidado con éxito.\nNota: ${finalGradeBaseTen.toFixed(2)}/10 (${finalScorePercentage.toFixed(2)}%)`);
+      alert(`Reporte finalizado.\nCalificacion: ${weightedScore.toFixed(2)} / ${maxScore.toFixed(2)} puntos`);
       router.replace('/nueva-auditoria');
     } catch (err: any) {
-      alert('Error en consolidación del reporte: ' + err.message);
+      alert('Error en consolidacion del reporte: ' + err.message);
     } finally {
       setIsSaving(false);
     }
   };
 
-  const ambosFirmados = firmaAuditorBase64 !== null && firmaResponsableBase64 !== null;
-
-  if (loading) return <View style={styles.center}><ActivityIndicator size="large" /><Text style={styles.textStyle}>Evaluando respuestas...</Text></View>;
+  if (loading) {
+    return <View style={styles.center}><ActivityIndicator size="large" /><Text style={styles.textStyle}>Preparando cierre...</Text></View>;
+  }
 
   return (
-    <ScrollView contentContainerStyle={styles.container}>
-      <Text style={styles.title}>Cierre Técnico de Auditoría</Text>
-      <Text style={styles.subtitle}>Resumen analítico previo al sellado digital</Text>
+    <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
+      <Text style={styles.title}>Cierre de auditoria</Text>
 
-      <View style={styles.metricCard}>
-        <Text style={styles.metricLabel}>Preguntas Evaluadas: <Text style={styles.metricValue}>{totalQuestions}</Text></Text>
-        <Text style={styles.metricLabel}>Cumplimientos: <Text style={styles.metricValue}>{correctAnswers}</Text></Text>
-        <Text style={styles.metricLabel}>Puntaje ponderado: <Text style={styles.metricValue}>{weightedScore.toFixed(2)} / {maxScore.toFixed(2)}</Text></Text>
+      <View style={styles.card}>
+        <Text style={styles.cardLabel}>Calificacion</Text>
+        <Text style={styles.scoreText}>{weightedScore.toFixed(2)} / {maxScore.toFixed(2)} puntos</Text>
       </View>
 
-      <SignaturePad
-        title="Firma del Auditor Evaluador"
-        onOK={(img) => setFirmaAuditorBase64(img)}
-        onClear={() => setFirmaAuditorBase64(null)}
-      />
+      <View style={styles.card}>
+        <Text style={styles.cardLabel}>Hora de culminacion</Text>
+        <TimeField value={endTime} visible={showEndTimePicker} onOpen={() => setShowEndTimePicker(true)} onChange={handleEndTimeChange} onWebChange={setEndTime} />
+      </View>
 
-      <SignaturePad
-        title="Firma del Responsable del Local"
-        onOK={(img) => setFirmaResponsableBase64(img)}
-        onClear={() => setFirmaResponsableBase64(null)}
-      />
+      <View style={styles.card}>
+        <ColorPicker label="Color firma auditor" value={auditorColor} onChange={setAuditorColor} />
+        <SignaturePad
+          title="Firma del auditor"
+          penColor={auditorColor}
+          previewUri={auditorSignature}
+          onOK={(signature, type) => {
+            setAuditorSignature(signature);
+            setAuditorSignatureType(type);
+          }}
+          onClear={() => {
+            setAuditorSignature(null);
+            setAuditorSignatureType(null);
+          }}
+        />
+        <Text style={styles.signatureName}>{reportSnapshot?.auditor_name_snapshot || 'Auditor'}</Text>
+      </View>
 
-      <TouchableOpacity 
-        style={[styles.submitButton, !ambosFirmados && styles.disabledButton]} 
+      <View style={styles.card}>
+        <ColorPicker label="Color firma responsable" value={responsibleColor} onChange={setResponsibleColor} />
+        <SignaturePad
+          title="Firma del responsable"
+          penColor={responsibleColor}
+          previewUri={responsibleSignature}
+          onOK={(signature, type) => {
+            setResponsibleSignature(signature);
+            setResponsibleSignatureType(type);
+          }}
+          onClear={() => {
+            setResponsibleSignature(null);
+            setResponsibleSignatureType(null);
+          }}
+        />
+        <Text style={styles.signatureName}>{responsibleDisplay}</Text>
+      </View>
+
+      <View style={styles.card}>
+        <Text style={styles.cardLabel}>Enviar</Text>
+        <View style={styles.sendGroup}>
+          <TouchableOpacity style={[styles.sendButton, shouldSend === true && styles.sendButtonActive]} onPress={() => setShouldSend(true)}>
+            <Text style={[styles.sendButtonText, shouldSend === true && styles.sendButtonTextActive]}>Si</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={[styles.sendButton, shouldSend === false && styles.sendButtonActive]} onPress={() => setShouldSend(false)}>
+            <Text style={[styles.sendButtonText, shouldSend === false && styles.sendButtonTextActive]}>No</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      <TouchableOpacity
+        style={[styles.submitButton, (!canFinalize || isSaving) && styles.disabledButton]}
         onPress={handleFinalizarReporte}
-        disabled={!ambosFirmados || isSaving}
+        disabled={!canFinalize || isSaving}
       >
-        <Text style={styles.submitButtonText}>
-          {isSaving ? 'Consolidando Bloques...' : 'Cerrar y Finalizar Reporte 🔐'}
-        </Text>
+        <Text style={styles.submitButtonText}>{isSaving ? 'Finalizando...' : 'Finalizar'}</Text>
       </TouchableOpacity>
     </ScrollView>
   );
 }
 
-const styles = StyleSheet.create({
-  container: { padding: 20, maxWidth: 500, alignSelf: 'center', width: '100%', backgroundColor: '#fff' },
-  center: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 30 },
-  textStyle: { marginTop: 8, color: '#4a5568' },
-  title: { fontSize: 22, fontWeight: 'bold', color: '#1a202c' },
-  subtitle: { fontSize: 13, color: '#718096', marginBottom: 15 },
-  metricCard: { backgroundColor: '#f7fafc', padding: 15, borderRadius: 8, borderWidth: 1, borderColor: '#e2e8f0', marginBottom: 20 },
-  metricLabel: { fontSize: 14, fontWeight: '600', color: '#4a5568', marginBottom: 4 },
-  metricValue: { fontWeight: 'bold', color: '#2d3748' },
-  submitButton: { backgroundColor: '#10b981', padding: 15, borderRadius: 6, alignItems: 'center', marginTop: 15, marginBottom: 60 },
-  disabledButton: { backgroundColor: '#a7f3d0', opacity: 0.7 },
-  submitButtonText: { color: '#fff', fontSize: 16, fontWeight: 'bold' }
-});
+function TimeField({
+  value,
+  visible,
+  onOpen,
+  onChange,
+  onWebChange,
+}: {
+  value: string;
+  visible: boolean;
+  onOpen: () => void;
+  onChange: (event: DateTimePickerEvent, date?: Date) => void;
+  onWebChange: (value: string) => void;
+}) {
+  if (Platform.OS === 'web') {
+    return React.createElement('input', {
+      type: 'time',
+      value,
+      onChange: (event: React.ChangeEvent<HTMLInputElement>) => onWebChange(event.target.value),
+      style: webInputStyle,
+    });
+  }
 
-function roundToTwo(value: number) {
-  return Math.round(value * 100) / 100;
+  return (
+    <View>
+      <TouchableOpacity style={styles.timeButton} onPress={onOpen}>
+        <Text style={styles.timeValue}>{value}</Text>
+      </TouchableOpacity>
+      {visible && <DateTimePicker value={new Date(`2026-01-01T${value || '00:00'}:00`)} mode="time" display="clock" onChange={onChange} is24Hour />}
+    </View>
+  );
 }
+
+function ColorPicker({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
+  return (
+    <View style={styles.colorSection}>
+      <Text style={styles.cardLabel}>{label}</Text>
+      <View style={styles.colorGroup}>
+        {signatureColors.map((color) => (
+          <TouchableOpacity
+            key={color.value}
+            style={[styles.colorButton, value === color.value && styles.colorButtonActive]}
+            onPress={() => onChange(color.value)}
+          >
+            <View style={[styles.colorSwatch, { backgroundColor: color.value }]} />
+            <Text style={styles.colorText}>{color.label}</Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+    </View>
+  );
+}
+
+const webInputStyle = {
+  width: '100%',
+  height: 48,
+  border: '1px solid #cbd5e1',
+  borderRadius: 8,
+  boxSizing: 'border-box',
+  padding: '0 12px',
+  fontSize: 16,
+  fontWeight: 800,
+  color: '#111827',
+  backgroundColor: '#fff',
+};
+
+const styles = StyleSheet.create({
+  container: { padding: 18, maxWidth: 620, alignSelf: 'center', width: '100%', backgroundColor: '#f3f6f8' },
+  center: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 30 },
+  textStyle: { marginTop: 8, color: '#475569' },
+  title: { fontSize: 22, fontWeight: '900', color: '#111827', marginBottom: 14 },
+  card: { backgroundColor: '#fff', borderWidth: 1, borderColor: '#dde5eb', borderRadius: 8, padding: 14, marginBottom: 14 },
+  cardLabel: { fontSize: 12, fontWeight: '900', color: '#475569', marginBottom: 8 },
+  scoreText: { fontSize: 28, fontWeight: '900', color: '#111827' },
+  timeButton: { minHeight: 50, borderWidth: 1, borderColor: '#cbd5e1', borderRadius: 8, justifyContent: 'center', paddingHorizontal: 12, backgroundColor: '#fff' },
+  timeValue: { fontSize: 18, fontWeight: '900', color: '#111827' },
+  colorSection: { marginBottom: 10 },
+  colorGroup: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  colorButton: { flexDirection: 'row', alignItems: 'center', gap: 6, borderWidth: 1, borderColor: '#dbe4ea', borderRadius: 8, paddingVertical: 8, paddingHorizontal: 10, backgroundColor: '#f8fafc' },
+  colorButtonActive: { borderColor: '#0f766e', backgroundColor: '#f0fdfa' },
+  colorSwatch: { width: 14, height: 14, borderRadius: 7 },
+  colorText: { color: '#334155', fontWeight: '800', fontSize: 12 },
+  signatureName: { color: '#111827', fontWeight: '900', marginTop: 2 },
+  sendGroup: { flexDirection: 'row', gap: 10 },
+  sendButton: { flex: 1, minHeight: 46, borderWidth: 1, borderColor: '#cbd5e1', borderRadius: 8, alignItems: 'center', justifyContent: 'center', backgroundColor: '#f8fafc' },
+  sendButtonActive: { borderColor: '#0f766e', backgroundColor: '#0f766e' },
+  sendButtonText: { color: '#334155', fontWeight: '900' },
+  sendButtonTextActive: { color: '#fff' },
+  submitButton: { backgroundColor: '#0f766e', padding: 15, borderRadius: 8, alignItems: 'center', marginTop: 4, marginBottom: 40 },
+  disabledButton: { backgroundColor: '#99c9c2', opacity: 0.75 },
+  submitButtonText: { color: '#fff', fontSize: 16, fontWeight: '900' },
+});

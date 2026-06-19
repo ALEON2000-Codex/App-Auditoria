@@ -1,14 +1,19 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Platform, View, Text, StyleSheet, TouchableOpacity } from 'react-native';
+import { Image, Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import * as ImagePicker from 'expo-image-picker';
 import SignatureScreen, { SignatureViewRef } from 'react-native-signature-canvas';
+
+export type SignatureInputType = 'drawn' | 'uploaded';
 
 interface SignaturePadProps {
   title: string;
-  onOK: (signature: string) => void;
+  penColor: string;
+  previewUri: string | null;
+  onOK: (signature: string, type: SignatureInputType) => void;
   onClear: () => void;
 }
 
-export default function SignaturePad({ title, onOK, onClear }: SignaturePadProps) {
+export default function SignaturePad({ title, penColor, previewUri, onOK, onClear }: SignaturePadProps) {
   const ref = useRef<SignatureViewRef>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const isDrawingRef = useRef(false);
@@ -32,13 +37,13 @@ export default function SignaturePad({ title, onOK, onClear }: SignaturePadProps
       context.lineCap = 'round';
       context.lineJoin = 'round';
       context.lineWidth = 2.5;
-      context.strokeStyle = '#111827';
+      context.strokeStyle = penColor;
     };
 
     resizeCanvas();
     window.addEventListener('resize', resizeCanvas);
     return () => window.removeEventListener('resize', resizeCanvas);
-  }, []);
+  }, [penColor]);
 
   const getCanvasPoint = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
@@ -58,6 +63,7 @@ export default function SignaturePad({ title, onOK, onClear }: SignaturePadProps
 
     event.preventDefault();
     canvas.setPointerCapture(event.pointerId);
+    context.strokeStyle = penColor;
     const point = getCanvasPoint(event);
     isDrawingRef.current = true;
     context.beginPath();
@@ -107,22 +113,40 @@ export default function SignaturePad({ title, onOK, onClear }: SignaturePadProps
         return;
       }
 
-      onOK(canvas.toDataURL('image/png'));
+      onOK(canvas.toDataURL('image/png'), 'drawn');
       return;
     }
 
     ref.current?.readSignature();
   };
 
-  // Estilos CSS inyectados para personalizar el contenedor interno del lienzo webview
-  const style = `.m-signature-pad--footer { display: none; margin: 0px; } body,html { width: 100%; height: 100%; }`;
+  const handleUploadSignature = async () => {
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) {
+      alert('Se requieren permisos para acceder a la galeria.');
+      return;
+    }
+
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      allowsEditing: true,
+      quality: 0.8,
+    });
+
+    if (result.canceled || !result.assets?.[0]?.uri) return;
+    onOK(result.assets[0].uri, 'uploaded');
+  };
+
+  const style = `.m-signature-pad--footer { display: none; margin: 0px; } body,html { width: 100%; height: 100%; } .m-signature-pad { box-shadow: none; border: 0; }`;
 
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>{title} *</Text>
-      
+      <Text style={styles.title}>{title}</Text>
+
       <View style={styles.canvasContainer}>
-        {Platform.OS === 'web' ? (
+        {previewUri ? (
+          <Image source={{ uri: previewUri }} style={styles.previewImage} resizeMode="contain" />
+        ) : Platform.OS === 'web' ? (
           React.createElement('canvas', {
             ref: canvasRef,
             onPointerDown: handleWebPointerDown,
@@ -140,21 +164,26 @@ export default function SignaturePad({ title, onOK, onClear }: SignaturePadProps
         ) : (
           <SignatureScreen
             ref={ref}
-            onOK={onOK}
+            onOK={(signature) => onOK(signature, 'drawn')}
             webStyle={style}
             autoClear={false}
             descriptionText=""
+            penColor={penColor}
           />
         )}
       </View>
 
       <View style={styles.buttonGroup}>
         <TouchableOpacity style={styles.clearButton} onPress={handleClear}>
-          <Text style={styles.clearButtonText}>Limpiar Lienzo 🔄</Text>
+          <Text style={styles.clearButtonText}>Limpiar</Text>
         </TouchableOpacity>
-        
+
+        <TouchableOpacity style={styles.secondaryButton} onPress={handleUploadSignature}>
+          <Text style={styles.secondaryButtonText}>Subir imagen</Text>
+        </TouchableOpacity>
+
         <TouchableOpacity style={styles.confirmButton} onPress={handleConfirm}>
-          <Text style={styles.confirmButtonText}>Confirmar Firma ✓</Text>
+          <Text style={styles.confirmButtonText}>Confirmar</Text>
         </TouchableOpacity>
       </View>
     </View>
@@ -162,12 +191,15 @@ export default function SignaturePad({ title, onOK, onClear }: SignaturePadProps
 }
 
 const styles = StyleSheet.create({
-  container: { width: '100%', marginBottom: 25 },
-  title: { fontSize: 14, fontWeight: '700', color: '#2d3748', marginBottom: 8 },
+  container: { width: '100%', marginBottom: 18 },
+  title: { fontSize: 14, fontWeight: '800', color: '#111827', marginBottom: 8 },
   canvasContainer: { width: '100%', height: 180, borderWidth: 1, borderColor: '#cbd5e0', borderRadius: 8, overflow: 'hidden', backgroundColor: '#fff' },
-  buttonGroup: { flexDirection: 'row', gap: 12, marginTop: 8 },
+  previewImage: { width: '100%', height: '100%', backgroundColor: '#fff' },
+  buttonGroup: { flexDirection: 'row', gap: 8, marginTop: 8 },
   clearButton: { flex: 1, padding: 10, borderWidth: 1, borderColor: '#e5e7eb', borderRadius: 6, alignItems: 'center', backgroundColor: '#f9fafb' },
-  clearButtonText: { color: '#4b5563', fontSize: 13, fontWeight: '600' },
-  confirmButton: { flex: 1, padding: 10, backgroundColor: '#0070f3', borderRadius: 6, alignItems: 'center' },
-  confirmButtonText: { color: '#fff', fontSize: 13, fontWeight: '600' }
+  clearButtonText: { color: '#4b5563', fontSize: 13, fontWeight: '700' },
+  secondaryButton: { flex: 1, padding: 10, borderWidth: 1, borderColor: '#0f766e', borderRadius: 6, alignItems: 'center', backgroundColor: '#f0fdfa' },
+  secondaryButtonText: { color: '#0f766e', fontSize: 13, fontWeight: '800' },
+  confirmButton: { flex: 1, padding: 10, backgroundColor: '#0f766e', borderRadius: 6, alignItems: 'center' },
+  confirmButtonText: { color: '#fff', fontSize: 13, fontWeight: '800' },
 });
