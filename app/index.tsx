@@ -34,12 +34,8 @@ export default function IndexPage() {
         return;
       }
 
-      // 3. Redirigir según el rol estricto obtenido de Supabase
-      if (profile.role === 'admin') {
-        router.replace('/dashboard');
-      } else {
-        router.replace('/nueva-auditoria');
-      }
+      // 3. Todos los roles pasan por el dashboard; la vista aplica el alcance por rol.
+      router.replace('/dashboard');
     }
 
     checkUserSession();

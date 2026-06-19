@@ -24,6 +24,7 @@ type AnswerRow = {
 
 type ProfileRow = {
   role: string;
+  region: string;
 };
 
 type SummaryRow = {
@@ -40,6 +41,7 @@ export default function AdminDashboard() {
   const [reports, setReports] = useState<ReportRow[]>([]);
   const [answers, setAnswers] = useState<AnswerRow[]>([]);
   const [role, setRole] = useState<string | null>(null);
+  const [userRegion, setUserRegion] = useState<string | null>(null);
   const [regionFilter, setRegionFilter] = useState('TODAS');
   const [visitTypeFilter, setVisitTypeFilter] = useState('TODOS');
   const [loading, setLoading] = useState(true);
@@ -62,7 +64,7 @@ export default function AdminDashboard() {
 
     const { data: profile, error: profileError } = await supabase
       .from('profiles')
-      .select('role')
+      .select('role, region')
       .eq('id', user.id)
       .single<ProfileRow>();
 
@@ -73,6 +75,10 @@ export default function AdminDashboard() {
     }
 
     setRole(profile.role);
+    setUserRegion(profile.region);
+    if (profile.role !== 'super_admin' && profile.region !== 'Global') {
+      setRegionFilter(profile.region);
+    }
 
     const { data: reportRows, error: reportsError } = await supabase
       .from('audit_reports')
@@ -111,11 +117,13 @@ export default function AdminDashboard() {
 
   const filteredReports = useMemo(() => {
     return reports.filter((report) => {
-      const matchesRegion = regionFilter === 'TODAS' || report.region === regionFilter;
+      const effectiveRegion =
+        role === 'super_admin' || userRegion === 'Global' ? regionFilter : userRegion || regionFilter;
+      const matchesRegion = effectiveRegion === 'TODAS' || report.region === effectiveRegion;
       const matchesVisitType = visitTypeFilter === 'TODOS' || report.visit_type_id === visitTypeFilter;
       return matchesRegion && matchesVisitType;
     });
-  }, [reports, regionFilter, visitTypeFilter]);
+  }, [reports, regionFilter, role, userRegion, visitTypeFilter]);
 
   const incidentCountByReport = useMemo(() => {
     return answers.reduce<Record<string, number>>((acc, answer) => {
@@ -164,21 +172,12 @@ export default function AdminDashboard() {
     );
   }
 
-  if (role !== 'super_admin') {
-    return (
-      <View style={styles.center}>
-        <Text style={styles.title}>Dashboard ejecutivo</Text>
-        <Text style={styles.mutedText}>Esta vista está disponible para usuarios super_admin.</Text>
-      </View>
-    );
-  }
-
   return (
     <ScrollView contentContainerStyle={styles.container}>
       <View style={styles.header}>
         <View>
           <Text style={styles.title}>Dashboard ejecutivo</Text>
-          <Text style={styles.subtitle}>Resumen de auditorías finalizadas</Text>
+          <Text style={styles.subtitle}>{getScopeText(role, userRegion)}</Text>
         </View>
         <TouchableOpacity style={styles.reloadButton} onPress={loadDashboard}>
           <Text style={styles.reloadButtonText}>Actualizar</Text>
@@ -189,7 +188,11 @@ export default function AdminDashboard() {
         <View style={styles.filterItem}>
           <Text style={styles.label}>Región</Text>
           <View style={styles.pickerContainer}>
-            <Picker selectedValue={regionFilter} onValueChange={setRegionFilter}>
+            <Picker
+              selectedValue={role === 'super_admin' || userRegion === 'Global' ? regionFilter : userRegion || regionFilter}
+              onValueChange={setRegionFilter}
+              enabled={role === 'super_admin' || userRegion === 'Global'}
+            >
               <Picker.Item label="Todas" value="TODAS" />
               <Picker.Item label="Costa" value="Costa" />
               <Picker.Item label="Sierra" value="Sierra" />
@@ -251,6 +254,12 @@ function buildSummary(
 function getLocalName(report: ReportRow) {
   const relatedLocal = Array.isArray(report.locales) ? report.locales[0] : report.locales;
   return relatedLocal?.nombre_local || report.local_codigo || 'Sin local';
+}
+
+function getScopeText(role: string | null, region: string | null) {
+  if (role === 'super_admin') return 'Vista global con filtros por región y tipo de visita';
+  if (region && region !== 'Global') return `Vista limitada a región ${region}`;
+  return 'Resumen de auditorías finalizadas';
 }
 
 function Kpi({ label, value }: { label: string; value: string }) {

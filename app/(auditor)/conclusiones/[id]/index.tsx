@@ -9,6 +9,9 @@ interface AnswerRecord {
   value: 'cumple' | 'no_cumple';
   observation: string;
   evidence_url: string;
+  checklist_questions?: {
+    score_points: number;
+  } | null;
 }
 
 export default function FinalizarReportePage() {
@@ -18,7 +21,9 @@ export default function FinalizarReportePage() {
   const [loading, setLoading] = useState(true);
   const [totalQuestions, setTotalQuestions] = useState(0);
   const [correctAnswers, setCorrectAnswers] = useState(0);
-  const [rawAnswers, setRawAnswers] = useState<any[]>([]);
+  const [rawAnswers, setRawAnswers] = useState<AnswerRecord[]>([]);
+  const [weightedScore, setWeightedScore] = useState(0);
+  const [maxScore, setMaxScore] = useState(0);
   const [isSaving, setIsSaving] = useState(false);
 
   // Almacenamiento Base64 temporal de firmas antes de subida binaria
@@ -31,14 +36,26 @@ export default function FinalizarReportePage() {
       setLoading(true);
       const { data, error } = await supabase
         .from('audit_answers_draft')
-        .select('*')
+        .select('*, checklist_questions(score_points)')
         .eq('report_id', reportId);
 
       if (data && data.length > 0) {
-        setRawAnswers(data);
+        const answers = data as AnswerRecord[];
+        const obtained = answers.reduce((total, answer) => {
+          const points = Number(answer.checklist_questions?.score_points || 0);
+          return answer.value === 'cumple' ? total + points : total;
+        }, 0);
+        const possible = answers.reduce(
+          (total, answer) => total + Number(answer.checklist_questions?.score_points || 0),
+          0,
+        );
+
+        setRawAnswers(answers);
         setTotalQuestions(data.length);
-        const cumpleCount = data.filter((a: any) => a.value === 'cumple').length;
+        const cumpleCount = answers.filter((a) => a.value === 'cumple').length;
         setCorrectAnswers(cumpleCount);
+        setWeightedScore(roundToTwo(obtained));
+        setMaxScore(roundToTwo(possible));
       }
       setLoading(false);
     }
@@ -81,9 +98,9 @@ export default function FinalizarReportePage() {
       const { data: { publicUrl: urlAuditor } } = supabase.storage.from('evidencias').getPublicUrl(pathAuditor);
       const { data: { publicUrl: urlResponsable } } = supabase.storage.from('evidencias').getPublicUrl(pathResponsable);
 
-      // D. CÁLCULO DE NOTA FINAL ($)
-      const finalScorePercentage = totalQuestions > 0 ? Math.round((correctAnswers / totalQuestions) * 100) : 0;
-      const finalGradeBaseTen = totalQuestions > 0 ? parseFloat(((correctAnswers / totalQuestions) * 10).toFixed(2)) : 0;
+      // D. CÁLCULO PONDERADO SOBRE 10 SEGÚN score_points
+      const finalScorePercentage = maxScore > 0 ? roundToTwo((weightedScore / maxScore) * 100) : 0;
+      const finalGradeBaseTen = maxScore > 0 ? roundToTwo((weightedScore / maxScore) * 10) : 0;
 
       // E. Migrar respuestas temporales a historial definitivo consolidado
       const answersPayload = rawAnswers.map((ra) => ({
@@ -119,7 +136,7 @@ await supabase.functions.invoke('finalize-report', {
       // G. Limpieza de tabla borrador intermedia
       await supabase.from('audit_answers_draft').delete().eq('report_id', reportId);
 
-      alert(`Reporte consolidado con éxito.\nNota: ${finalGradeBaseTen}/10 (${finalScorePercentage}%)`);
+      alert(`Reporte consolidado con éxito.\nNota: ${finalGradeBaseTen.toFixed(2)}/10 (${finalScorePercentage.toFixed(2)}%)`);
       router.replace('/nueva-auditoria');
     } catch (err: any) {
       alert('Error en consolidación del reporte: ' + err.message);
@@ -140,6 +157,7 @@ await supabase.functions.invoke('finalize-report', {
       <View style={styles.metricCard}>
         <Text style={styles.metricLabel}>Preguntas Evaluadas: <Text style={styles.metricValue}>{totalQuestions}</Text></Text>
         <Text style={styles.metricLabel}>Cumplimientos: <Text style={styles.metricValue}>{correctAnswers}</Text></Text>
+        <Text style={styles.metricLabel}>Puntaje ponderado: <Text style={styles.metricValue}>{weightedScore.toFixed(2)} / {maxScore.toFixed(2)}</Text></Text>
       </View>
 
       <SignaturePad
@@ -180,3 +198,7 @@ const styles = StyleSheet.create({
   disabledButton: { backgroundColor: '#a7f3d0', opacity: 0.7 },
   submitButtonText: { color: '#fff', fontSize: 16, fontWeight: 'bold' }
 });
+
+function roundToTwo(value: number) {
+  return Math.round(value * 100) / 100;
+}
