@@ -10,6 +10,7 @@ const REPORT_BCC_EMAILS = Deno.env.get('REPORT_BCC_EMAILS') || ''
 const WEB_APP_URL = Deno.env.get('WEB_APP_URL') || ''
 const ANDROID_DOWNLOAD_URL = Deno.env.get('ANDROID_DOWNLOAD_URL') || ''
 const SUPPORT_EMAIL = Deno.env.get('SUPPORT_EMAIL') || ''
+const REPORT_HORIZONTAL_LOGO_URL = Deno.env.get('REPORT_HORIZONTAL_LOGO_URL') || ''
 const REPORT_LOGO_URL = Deno.env.get('REPORT_LOGO_URL') || Deno.env.get('COMPANY_LOGO_URL') || ''
 
 const emailColors = {
@@ -76,6 +77,7 @@ type AnswerRow = {
     score_points: number | null
     question_type: QuestionType | string | null
     is_scored: boolean | null
+    sort_order: number | null
   } | null
 }
 
@@ -158,14 +160,18 @@ function renderFooterLinks() {
 }
 
 function renderReportLogo() {
-  if (!REPORT_LOGO_URL) return '<p style="margin:0 0 6px 0; font-size:12px; letter-spacing:0.08em; text-transform:uppercase; font-weight:700;">Sweet & Coffee</p>'
+  const logoUrl = REPORT_HORIZONTAL_LOGO_URL || REPORT_LOGO_URL
+  if (!logoUrl) return '<p style="margin:0; font-size:15px; letter-spacing:0.04em; text-transform:uppercase; font-weight:700;">Sweet & Coffee</p>'
 
   return `
-    <div style="display:flex; align-items:center; gap:12px; margin-bottom:10px;">
-      <img src="${escapeHtml(REPORT_LOGO_URL)}" alt="Sweet & Coffee" style="width:54px; height:54px; object-fit:contain; border-radius:8px; background:${emailColors.white};" />
-      <p style="margin:0; font-size:12px; letter-spacing:0.08em; text-transform:uppercase; font-weight:700;">Sweet & Coffee</p>
-    </div>
+    <img src="${escapeHtml(logoUrl)}" alt="Sweet & Coffee" style="display:block; width:220px; max-width:100%; height:58px; object-fit:contain; object-position:right center;" />
   `
+}
+
+function compareAnswerOrder(left: AnswerRow, right: AnswerRow) {
+  const leftOrder = Number(left.checklist_questions?.sort_order ?? Number.MAX_SAFE_INTEGER)
+  const rightOrder = Number(right.checklist_questions?.sort_order ?? Number.MAX_SAFE_INTEGER)
+  return leftOrder - rightOrder || left.question_id.localeCompare(right.question_id)
 }
 
 function questionType(answer: AnswerRow): string {
@@ -515,12 +521,12 @@ Deno.serve(async (req) => {
 
     const { data: answers, error: errAnswers } = await supabase
       .from('audit_answers_final')
-      .select('question_id, value, observation, evidence_url, numeric_value_theoretical, numeric_value_physical, numeric_value_current, numeric_value_previous, numeric_items, checklist_questions(question_text, score_points, question_type, is_scored)')
+      .select('question_id, value, observation, evidence_url, numeric_value_theoretical, numeric_value_physical, numeric_value_current, numeric_value_previous, numeric_items, checklist_questions(question_text, score_points, question_type, is_scored, sort_order)')
       .eq('report_id', reportId)
 
     if (errAnswers) throw new Error(`Error leyendo respuestas: ${errAnswers.message}`)
 
-    const finalAnswers = (answers || []) as AnswerRow[]
+    const finalAnswers = ((answers || []) as AnswerRow[]).sort(compareAnswerOrder)
     const obtained = finalAnswers.reduce((total, answer) => total + obtainedPoints(answer), 0)
     const possible = finalAnswers.reduce((total, answer) => total + possiblePoints(answer), 0)
     const scoreText = `${formatNumber(obtained)} / ${formatNumber(possible)} puntos`
@@ -528,8 +534,7 @@ Deno.serve(async (req) => {
     const localName = report.local_name_snapshot || report.locales?.nombre_local || report.local_codigo || 'Local'
     const localCode = report.local_code_snapshot || report.local_codigo || ''
     const sentDate = formatSentDate()
-    const subjectPrefix = isResend ? 'REENVIO - ' : ''
-    const subject = `${subjectPrefix}REPORTE DE VISITA ${visitType.toUpperCase()} LOCAL ${localName.toUpperCase()}${localCode ? ` ${localCode.toUpperCase()}` : ''} ENVIADO EL ${sentDate}`
+    const subject = `REPORTE DE VISITA ${visitType.toUpperCase()} LOCAL ${localName.toUpperCase()}${localCode ? ` ${localCode.toUpperCase()}` : ''} ENVIADO EL ${sentDate}`
     const auditorSignatureUrl = report.auditor_signature_url || report.signature_auditor_url
     const responsibleSignatureUrl = report.responsible_signature_url || report.signature_responsible_url
 
@@ -540,10 +545,11 @@ Deno.serve(async (req) => {
 
     const emailHtmlBody = `
       <div style="font-family:Arial, sans-serif; color:${emailColors.textPrimary}; max-width:1080px; margin:0 auto; background:${emailColors.creamSoft}; padding:30px; font-size:16px; line-height:1.55;">
-        <div style="background:${emailColors.greenDark}; color:${emailColors.logoWhite}; border-radius:12px 12px 0 0; padding:22px 28px;">
-          ${renderReportLogo()}
+        <div style="background:${emailColors.greenDark}; color:${emailColors.logoWhite}; border-radius:12px 12px 0 0; padding:16px 24px;">
+          <table role="presentation" style="width:100%; border-collapse:collapse;"><tr><td style="vertical-align:middle; text-align:left; padding-right:18px;">
           <h2 style="margin:0; font-size:22px; color:${emailColors.white};">Reporte de visita ${escapeHtml(visitType)}</h2>
           <p style="margin:8px 0 0 0; color:${emailColors.logoWhite};">${escapeHtml(localName)}${localCode ? ` · ${escapeHtml(localCode)}` : ''} · ${scoreText}</p>
+          </td><td style="width:230px; vertical-align:middle; text-align:right;">${renderReportLogo()}</td></tr></table>
         </div>
         <div style="background:${emailColors.white}; border:1px solid ${emailColors.border}; border-top:0; border-radius:0 0 12px 12px; padding:28px;">
           <p style="margin:0 0 12px 0;">Buen Día Estimados,</p>

@@ -669,7 +669,6 @@ export default function ChecklistDinamicoPage() {
       if (resendUpdateError) throw resendUpdateError;
     }
 
-    alert(wasSent && hasChanges ? 'Visita actualizada y reporte reenviado.' : 'Visita actualizada.');
     router.replace('/dashboard');
   };
 
